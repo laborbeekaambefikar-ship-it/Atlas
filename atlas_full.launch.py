@@ -1,7 +1,6 @@
-"""
-ATLAS_FLEET full system launch — ONE command starts everything.
-"""
-import os, subprocess
+"""ATLAS_FLEET full system launch — ONE command starts everything."""
+import os
+import subprocess
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, TimerAction
 from launch.substitutions import Command
@@ -9,19 +8,19 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
+
 def generate_launch_description():
     desc_pkg = get_package_share_directory('atlas_description')
     gz_pkg = get_package_share_directory('atlas_gazebo')
 
     world = os.path.join(gz_pkg, 'worlds', 'warehouse.world')
     xacro_file = os.path.join(desc_pkg, 'urdf', 'atlas_agv.urdf.xacro')
-    rviz_cfg = os.path.join(desc_pkg, 'rviz', 'atlas.rviz')
 
     # Pre-process xacro to temp file for spawn_entity -file
     urdf_tmp = '/tmp/atlas_agv.urdf'
     subprocess.run(['xacro', xacro_file, '-o', urdf_tmp], check=True)
 
-    # ── t=0: Gazebo ──
+    # t=0: Gazebo
     gazebo = ExecuteProcess(
         cmd=['gazebo', '--verbose', world,
              '-s', 'libgazebo_ros_init.so',
@@ -29,7 +28,7 @@ def generate_launch_description():
         output='screen',
     )
 
-    # ── t=4: Spawn robot from file (no double-spawn) ──
+    # t=4: Spawn robot
     spawn = Node(
         package='gazebo_ros',
         executable='spawn_entity.py',
@@ -43,7 +42,7 @@ def generate_launch_description():
     )
     spawn_t = TimerAction(period=4.0, actions=[spawn])
 
-    # ── t=6: Robot State Publisher ──
+    # t=6: Robot State Publisher
     robot_desc = Command(['xacro ', xacro_file])
     rsp = Node(
         package='robot_state_publisher',
@@ -57,7 +56,7 @@ def generate_launch_description():
     )
     rsp_t = TimerAction(period=6.0, actions=[rsp])
 
-    # ── t=10: Navigation + Mission nodes ──
+    # t=10: Navigation + Mission nodes
     nav_nodes = [
         Node(package='atlas_navigation', executable='line_sensor',
              name='atlas_line_sensor', output='screen'),
@@ -72,23 +71,19 @@ def generate_launch_description():
     ]
     nav_t = TimerAction(period=10.0, actions=nav_nodes)
 
-    # ── t=12: RViz ──
+    # t=12: RViz
     rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='atlas_rviz',
-        arguments=['-d', rviz_cfg],
-        output='log',
-        parameters=[{'use_sim_time': True}],
+        package='rviz2', executable='rviz2', name='atlas_rviz',
+        output='log', parameters=[{'use_sim_time': True}],
     )
     rviz_t = TimerAction(period=12.0, actions=[rviz])
 
-    # ── t=14: GUI (runs independently — crash won't kill robot) ──
+    # t=14: GUI (runs independently — crash won't kill robot)
     gui = Node(
         package='atlas_mission_manager',
         executable='atlas_gui',
-        name='atlas_gui',
-        output='log',
+        name='atlas_control_center',
+        output='screen',
     )
     gui_t = TimerAction(period=14.0, actions=[gui])
 

@@ -1,6 +1,7 @@
 """
 ATLAS Fleet Control Center — PyQt5 Industrial Dashboard
 ROS2 Humble compatible GUI for Atlas Warehouse AGV system.
+Includes docking state indicators and proper RESET AGV with physical recovery.
 """
 import sys
 import math
@@ -11,7 +12,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QGroupBox, QLabel, QPushButton, QComboBox,
-    QTableWidget, QTableWidgetItem, QTextEdit, QSplitter,
+    QTableWidget, QTableWidgetItem, QPlainTextEdit, QSplitter,
     QMessageBox, QHeaderView, QFrame, QSpinBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
@@ -56,7 +57,6 @@ QPushButton#estop {
     font-size: 14px;
     min-height: 40px;
 }
-
 QPushButton#estop:hover { background-color: #aa0000; }
 QPushButton#reset_agv {
     background-color: #8b4500;
@@ -102,7 +102,7 @@ QHeaderView::section {
     padding: 4px;
     font-weight: bold;
 }
-QTextEdit {
+QPlainTextEdit {
     background-color: #0a0a1a;
     border: 1px solid #3a3a5c;
     color: #b0ffb0;
@@ -119,8 +119,6 @@ QLabel#header {
 QFrame#separator { background-color: #3a3a5c; }
 """
 
-
-
 # Shelf catalog matching mission_node.py exactly
 AISLE_Y = [2, 4, 6, 8, 10]
 SHELF_X = [1.0, 2.0, 3.0, 4.0]
@@ -135,6 +133,28 @@ SKU_LIST = [
     'SKU-001', 'SKU-002', 'SKU-003', 'SKU-004', 'SKU-005',
     'SKU-010', 'SKU-020', 'SKU-050', 'SKU-100', 'SKU-200',
 ]
+
+# State color mapping
+STATE_COLORS = {
+    'IDLE': '#88ff88',
+    'READY': '#00ff00',
+    'NAV_SPINE': '#44aaff',
+    'NAV_AISLE': '#44aaff',
+    'TURNING': '#44aaff',
+    'RET_AISLE': '#44aaff',
+    'RET_TURN': '#44aaff',
+    'RET_SPINE': '#44aaff',
+    'RETURNING_HOME': '#4488ff',
+    'DOCKING': '#ffcc00',
+    'ALIGNMENT': '#ffcc00',
+    'RECOVERY_DOCKING': '#ff8800',
+    'RESETTING': '#ff8800',
+    'AT_SHELF': '#00d4aa',
+    'PICKUP': '#00d4aa',
+    'PIVOT': '#00d4aa',
+    'DOCKED': '#00d4aa',
+    'ERROR': '#ff4444',
+}
 
 
 class SignalBridge(QObject):
@@ -155,36 +175,21 @@ class AtlasRosNode(Node):
         self._last_state_time = 0.0
 
         # Subscribers
-        self.create_subscription(
-            RobotState, '/atlas/robot_state', self._state_cb, 10)
-        self.create_subscription(
-            String, '/atlas/log', self._log_cb, 50)
-        self.create_subscription(
-            Odometry, '/atlas/odom', self._odom_cb, 10)
-        self.create_subscription(
-            ShelfTag, '/atlas/tag_event', self._tag_cb, 10)
+        self.create_subscription(RobotState, '/atlas/robot_state', self._state_cb, 10)
+        self.create_subscription(String, '/atlas/log', self._log_cb, 50)
+        self.create_subscription(Odometry, '/atlas/odom', self._odom_cb, 10)
+        self.create_subscription(ShelfTag, '/atlas/tag_event', self._tag_cb, 10)
 
         # Publishers
-        self.pub_mission = self.create_publisher(
-            FleetMission, '/atlas/mission_cmd', 10)
-        self.pub_estop = self.create_publisher(
-            Empty, '/atlas/estop', 10)
-        self.pub_reset = self.create_publisher(
-            Empty, '/atlas/reset', 10)
-        self.pub_reset_dock = self.create_publisher(
-            Empty, '/atlas/reset_to_dock', 10)
-        self.pub_cmd_vel = self.create_publisher(
-            Twist, '/atlas/cmd_vel', 10)
-
-        # Service client for Gazebo reset
-        self.set_entity_client = self.create_client(
-            SetEntityState, '/set_entity_state')
+        self.pub_mission = self.create_publisher(FleetMission, '/atlas/mission_cmd', 10)
+        self.pub_estop = self.create_publisher(Empty, '/atlas/estop', 10)
+        self.pub_reset = self.create_publisher(Empty, '/atlas/reset', 10)
+        self.pub_reset_dock = self.create_publisher(Empty, '/atlas/reset_to_dock', 10)
+        self.pub_cmd_vel = self.create_publisher(Twist, '/atlas/cmd_vel', 10)
 
         # Connection watchdog
         self.create_timer(2.0, self._check_connection)
-
         self.get_logger().info('Atlas Control Center node started')
-
 
     def _state_cb(self, msg):
         self._last_state_time = self.get_clock().now().nanoseconds * 1e-9
@@ -204,9 +209,7 @@ class AtlasRosNode(Node):
             x = msg.pose.pose.position.x
             y = msg.pose.pose.position.y
             q = msg.pose.pose.orientation
-            yaw = math.atan2(
-                2.0 * (q.w * q.z + q.x * q.y),
-                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z))
             vx = msg.twist.twist.linear.x
             wz = msg.twist.twist.angular.z
             self.signals.odom_update.emit(x, y, yaw, vx, wz)
@@ -246,44 +249,15 @@ class AtlasRosNode(Node):
         self.get_logger().info('E-Stop reset')
 
     def send_reset_to_dock(self):
-        """Full AGV reset: stop, clear state, respawn at home."""
-        # 1. Stop robot immediately
-        stop = Twist()
-        self.pub_cmd_vel.publish(stop)
-        # 2. Send reset command to mission manager
-        self.pub_reset.publish(Empty())
-        # 3. Send reset_to_dock
+        """Full AGV reset: publishes to /atlas/reset_to_dock.
+        The mission_node handles the actual Gazebo reset + docking sequence."""
+        # Stop robot immediately from GUI side
+        self.pub_cmd_vel.publish(Twist())
+        # Publish reset_to_dock — mission_node does the physical reset
         self.pub_reset_dock.publish(Empty())
-        # 4. Also try Gazebo service for physical reset
-        self._gazebo_reset()
-        self.get_logger().warn('RESET AGV: Robot returned to dock')
-
-
-    def _gazebo_reset(self):
-        """Reset robot position in Gazebo via service."""
-        if not self.set_entity_client.service_is_ready():
-            self.get_logger().warn('Gazebo set_entity_state not available')
-            return
-        from gazebo_msgs.msg import EntityState
-        from geometry_msgs.msg import Pose, Twist as GzTwist
-        req = SetEntityState.Request()
-        state = EntityState()
-        state.name = 'atlas_agv'
-        state.pose.position.x = 0.0
-        state.pose.position.y = 0.0
-        state.pose.position.z = 0.01
-        # yaw = pi/2 quaternion
-        state.pose.orientation.x = 0.0
-        state.pose.orientation.y = 0.0
-        state.pose.orientation.z = 0.7071068
-        state.pose.orientation.w = 0.7071068
-        state.twist = GzTwist()
-        state.reference_frame = 'world'
-        req.state = state
-        self.set_entity_client.call_async(req)
+        self.get_logger().warn('RESET AGV: Physical reset requested')
 
     def send_return_home(self):
-        """Send a mission to return to home dock area."""
         self.pub_reset.publish(Empty())
         self.get_logger().info('Return Home requested')
 
@@ -299,22 +273,13 @@ class AtlasControlCenter(QMainWindow):
         self.setMinimumSize(1200, 800)
         self.resize(1400, 900)
 
-        # State tracking
         self._state = 'IDLE'
-        self._mission_id = ''
-        self._target_shelf = ''
-        self._sku = ''
         self._x = 0.0
         self._y = 0.0
         self._yaw = 0.0
         self._vx = 0.0
         self._wz = 0.0
-        self._last_tag = ''
-        self._last_shelf = ''
         self._connected = False
-        self._battery = 100.0
-        self._carrying = False
-        self._mission_log = []
 
         self._build_ui()
         self._connect_signals()
@@ -326,17 +291,15 @@ class AtlasControlCenter(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
-        # Header
         header = QLabel('ATLAS FLEET CONTROL CENTER')
         header.setObjectName('header')
         header.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(header)
 
-        # Main splitter
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
 
-        # Left panel: Controls
+        # Left panel
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
@@ -347,17 +310,17 @@ class AtlasControlCenter(QMainWindow):
         left_layout.addStretch()
         splitter.addWidget(left)
 
-
-        # Center panel: Status + Queue
+        # Center panel
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(4, 4, 4, 4)
         center_layout.setSpacing(6)
         center_layout.addWidget(self._build_status_panel())
+        center_layout.addWidget(self._build_docking_panel())
         center_layout.addWidget(self._build_queue_panel())
         splitter.addWidget(center)
 
-        # Right panel: Log
+        # Right panel
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 4, 4, 4)
@@ -370,95 +333,68 @@ class AtlasControlCenter(QMainWindow):
     def _build_mission_panel(self):
         group = QGroupBox('Mission Creation')
         layout = QGridLayout(group)
-
         layout.addWidget(QLabel('Target Shelf:'), 0, 0)
         self.combo_shelf = QComboBox()
         self.combo_shelf.addItems(SHELF_LIST)
         layout.addWidget(self.combo_shelf, 0, 1)
-
         layout.addWidget(QLabel('SKU:'), 1, 0)
         self.combo_sku = QComboBox()
         self.combo_sku.addItems(SKU_LIST)
         self.combo_sku.setEditable(True)
         layout.addWidget(self.combo_sku, 1, 1)
-
         layout.addWidget(QLabel('Priority:'), 2, 0)
         self.spin_priority = QSpinBox()
         self.spin_priority.setRange(1, 10)
         self.spin_priority.setValue(1)
         layout.addWidget(self.spin_priority, 2, 1)
-
         btn_dispatch = QPushButton('DISPATCH MISSION')
         btn_dispatch.setObjectName('dispatch')
         btn_dispatch.clicked.connect(self._on_dispatch)
         layout.addWidget(btn_dispatch, 3, 0, 1, 2)
-
         return group
 
     def _build_control_panel(self):
         group = QGroupBox('Mission Control')
         layout = QVBoxLayout(group)
-
-        btn_pause = QPushButton('Pause Mission')
-        btn_pause.clicked.connect(self._on_pause)
-        layout.addWidget(btn_pause)
-
-        btn_resume = QPushButton('Resume Mission')
-        btn_resume.clicked.connect(self._on_resume)
-        layout.addWidget(btn_resume)
-
-        btn_cancel = QPushButton('Cancel Mission')
-        btn_cancel.clicked.connect(self._on_cancel)
-        layout.addWidget(btn_cancel)
-
-        btn_home = QPushButton('Return Home')
-        btn_home.clicked.connect(self._on_return_home)
-        layout.addWidget(btn_home)
-
+        for text, handler in [('Pause Mission', self._on_pause),
+                              ('Resume Mission', self._on_resume),
+                              ('Cancel Mission', self._on_cancel),
+                              ('Return Home', self._on_return_home)]:
+            btn = QPushButton(text)
+            btn.clicked.connect(handler)
+            layout.addWidget(btn)
         return group
-
 
     def _build_emergency_panel(self):
         group = QGroupBox('Emergency Controls')
         layout = QVBoxLayout(group)
-
         btn_estop = QPushButton('EMERGENCY STOP')
         btn_estop.setObjectName('estop')
         btn_estop.clicked.connect(self._on_estop)
         layout.addWidget(btn_estop)
-
         btn_reset_estop = QPushButton('Reset E-Stop')
         btn_reset_estop.clicked.connect(self._on_reset_estop)
         layout.addWidget(btn_reset_estop)
-
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setObjectName('separator')
         layout.addWidget(sep)
-
         btn_reset_agv = QPushButton('RESET AGV TO DOCK')
         btn_reset_agv.setObjectName('reset_agv')
         btn_reset_agv.clicked.connect(self._on_reset_agv)
         layout.addWidget(btn_reset_agv)
-
         return group
 
     def _build_status_panel(self):
         group = QGroupBox('Robot Status')
         layout = QGridLayout(group)
-
         self.status_labels = {}
         fields = [
-            ('State', 'state'),
-            ('Mission', 'mission'),
-            ('Target Shelf', 'shelf'),
-            ('SKU', 'sku'),
-            ('Position', 'position'),
-            ('Heading', 'heading'),
-            ('Velocity', 'velocity'),
-            ('Last RFID', 'rfid'),
-            ('Battery', 'battery'),
-            ('Carrying', 'carrying'),
+            ('State', 'state'), ('Mission', 'mission'),
+            ('Target Shelf', 'shelf'), ('SKU', 'sku'),
+            ('Position', 'position'), ('Heading', 'heading'),
+            ('Velocity', 'velocity'), ('Last RFID', 'rfid'),
+            ('Battery', 'battery'), ('Carrying', 'carrying'),
             ('Connection', 'connection'),
         ]
         for row, (label_text, key) in enumerate(fields):
@@ -469,38 +405,51 @@ class AtlasControlCenter(QMainWindow):
             val.setObjectName('status_value')
             layout.addWidget(val, row, 1)
             self.status_labels[key] = val
+        return group
 
+    def _build_docking_panel(self):
+        """Docking state indicators."""
+        group = QGroupBox('Docking Status')
+        layout = QGridLayout(group)
+        self.dock_labels = {}
+        fields = [
+            ('Dock State', 'dock_state'),
+            ('Line Detected', 'line_detected'),
+            ('Alignment', 'alignment'),
+            ('Home Reached', 'home_reached'),
+            ('Ready', 'ready_status'),
+        ]
+        for row, (label_text, key) in enumerate(fields):
+            lbl = QLabel(f'{label_text}:')
+            lbl.setStyleSheet('color: #888;')
+            layout.addWidget(lbl, row, 0)
+            val = QLabel('---')
+            val.setStyleSheet('font-weight: bold;')
+            layout.addWidget(val, row, 1)
+            self.dock_labels[key] = val
         return group
 
     def _build_queue_panel(self):
         group = QGroupBox('Mission Queue')
         layout = QVBoxLayout(group)
-
         self.queue_table = QTableWidget(0, 4)
         self.queue_table.setHorizontalHeaderLabels(
             ['Mission ID', 'Shelf', 'SKU', 'Priority'])
-        self.queue_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch)
-        self.queue_table.setSelectionBehavior(
-            QTableWidget.SelectRows)
+        self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.queue_table)
-
         return group
-
 
     def _build_log_panel(self):
         group = QGroupBox('Event Log')
         layout = QVBoxLayout(group)
-
-        self.log_text = QTextEdit()
+        self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumBlockCount(500)
         layout.addWidget(self.log_text)
-
         btn_clear = QPushButton('Clear Log')
         btn_clear.clicked.connect(self.log_text.clear)
         layout.addWidget(btn_clear)
-
         return group
 
     def _connect_signals(self):
@@ -510,49 +459,103 @@ class AtlasControlCenter(QMainWindow):
         self.signals.tag_update.connect(self._on_tag_update)
         self.signals.connection_update.connect(self._on_connection_update)
 
-    # ─── Signal handlers ─────────────────────────────────
+    # === Signal handlers ===
 
     def _on_state_update(self, msg):
         try:
             self._state = msg.state
-            self._mission_id = msg.mission_id
-            self._target_shelf = msg.target_shelf
-            self._sku = msg.current_sku
-            self._last_tag = msg.last_tag
-            self._battery = msg.battery_percent
-            self._carrying = msg.carrying_load
-
             self.status_labels['state'].setText(msg.state)
-            self.status_labels['mission'].setText(
-                msg.mission_id if msg.mission_id else 'None')
-            self.status_labels['shelf'].setText(
-                msg.target_shelf if msg.target_shelf else '---')
-            self.status_labels['sku'].setText(
-                msg.current_sku if msg.current_sku else '---')
-            self.status_labels['rfid'].setText(
-                msg.last_tag if msg.last_tag else '---')
-            self.status_labels['battery'].setText(
-                f'{msg.battery_percent:.0f}%')
-            self.status_labels['carrying'].setText(
-                'YES' if msg.carrying_load else 'No')
+            self.status_labels['mission'].setText(msg.mission_id or 'None')
+            self.status_labels['shelf'].setText(msg.target_shelf or '---')
+            self.status_labels['sku'].setText(msg.current_sku or '---')
+            self.status_labels['rfid'].setText(msg.last_tag or '---')
+            self.status_labels['battery'].setText(f'{msg.battery_percent:.0f}%')
+            self.status_labels['carrying'].setText('YES' if msg.carrying_load else 'No')
 
-            # Color code state
-            color = '#00d4aa'
-            if msg.state == 'ERROR':
-                color = '#ff4444'
-            elif msg.state == 'IDLE':
-                color = '#88ff88'
-            elif 'NAV' in msg.state:
-                color = '#44aaff'
+            # State color
+            color = STATE_COLORS.get(msg.state, '#00d4aa')
             self.status_labels['state'].setStyleSheet(
                 f'color: {color}; font-weight: bold;')
+
+            # Update docking indicators
+            self._update_docking_indicators(msg.state)
+        except Exception:
+            pass
+
+    def _update_docking_indicators(self, state):
+        """Update the docking panel based on current state."""
+        try:
+            # Dock state
+            dock_states = ['RETURNING_HOME', 'DOCKING', 'ALIGNMENT',
+                           'RECOVERY_DOCKING', 'RESETTING', 'READY']
+            if state in dock_states:
+                self.dock_labels['dock_state'].setText(state)
+                color = STATE_COLORS.get(state, '#ffcc00')
+                self.dock_labels['dock_state'].setStyleSheet(
+                    f'color: {color}; font-weight: bold;')
+            elif state == 'IDLE':
+                self.dock_labels['dock_state'].setText('IDLE')
+                self.dock_labels['dock_state'].setStyleSheet(
+                    'color: #88ff88; font-weight: bold;')
+            else:
+                self.dock_labels['dock_state'].setText('IN MISSION')
+                self.dock_labels['dock_state'].setStyleSheet(
+                    'color: #44aaff; font-weight: bold;')
+
+            # Ready status
+            if state in ('IDLE', 'READY'):
+                self.dock_labels['ready_status'].setText('READY')
+                self.dock_labels['ready_status'].setStyleSheet(
+                    'color: #00ff00; font-weight: bold;')
+            elif state == 'ERROR':
+                self.dock_labels['ready_status'].setText('ERROR')
+                self.dock_labels['ready_status'].setStyleSheet(
+                    'color: #ff4444; font-weight: bold;')
+            else:
+                self.dock_labels['ready_status'].setText('BUSY')
+                self.dock_labels['ready_status'].setStyleSheet(
+                    'color: #ffcc00; font-weight: bold;')
+
+            # Home reached
+            dist = math.hypot(self._x, self._y)
+            if dist < 0.1:
+                self.dock_labels['home_reached'].setText('YES')
+                self.dock_labels['home_reached'].setStyleSheet(
+                    'color: #00ff00; font-weight: bold;')
+            else:
+                self.dock_labels['home_reached'].setText(f'No ({dist:.2f}m)')
+                self.dock_labels['home_reached'].setStyleSheet(
+                    'color: #ff8800; font-weight: bold;')
+
+            # Alignment (yaw error from 90 degrees)
+            yaw_err = abs(math.degrees(self._yaw) - 90.0)
+            if yaw_err > 180:
+                yaw_err = 360 - yaw_err
+            if yaw_err < 3.0:
+                self.dock_labels['alignment'].setText(f'OK ({yaw_err:.1f} deg)')
+                self.dock_labels['alignment'].setStyleSheet(
+                    'color: #00ff00; font-weight: bold;')
+            else:
+                self.dock_labels['alignment'].setText(f'{yaw_err:.1f} deg error')
+                self.dock_labels['alignment'].setStyleSheet(
+                    'color: #ff8800; font-weight: bold;')
+
+            # Line detected (based on position near spine x=0)
+            if abs(self._x) < 0.05:
+                self.dock_labels['line_detected'].setText('ON LINE')
+                self.dock_labels['line_detected'].setStyleSheet(
+                    'color: #00ff00; font-weight: bold;')
+            else:
+                self.dock_labels['line_detected'].setText(f'OFF ({abs(self._x):.3f}m)')
+                self.dock_labels['line_detected'].setStyleSheet(
+                    'color: #ff4444; font-weight: bold;')
         except Exception:
             pass
 
     def _on_log_update(self, text):
         try:
             ts = datetime.now().strftime('%H:%M:%S')
-            self.log_text.append(f'[{ts}] {text}')
+            self.log_text.appendPlainText(f'[{ts}] {text}')
         except Exception:
             pass
 
@@ -563,18 +566,14 @@ class AtlasControlCenter(QMainWindow):
             self._yaw = yaw
             self._vx = vx
             self._wz = wz
-            self.status_labels['position'].setText(
-                f'({x:.2f}, {y:.2f})')
-            self.status_labels['heading'].setText(
-                f'{math.degrees(yaw):.1f} deg')
-            self.status_labels['velocity'].setText(
-                f'lin={vx:.2f} ang={wz:.2f}')
+            self.status_labels['position'].setText(f'({x:.2f}, {y:.2f})')
+            self.status_labels['heading'].setText(f'{math.degrees(yaw):.1f} deg')
+            self.status_labels['velocity'].setText(f'lin={vx:.2f} ang={wz:.2f}')
         except Exception:
             pass
 
     def _on_tag_update(self, tag_id, shelf_id):
         try:
-            self._last_shelf = shelf_id
             self.status_labels['rfid'].setText(tag_id)
         except Exception:
             pass
@@ -593,22 +592,20 @@ class AtlasControlCenter(QMainWindow):
         except Exception:
             pass
 
-
-    # ─── Button handlers ─────────────────────────────────
+    # === Button handlers ===
 
     def _on_dispatch(self):
         shelf = self.combo_shelf.currentText()
         sku = self.combo_sku.currentText()
         priority = self.spin_priority.value()
         mid = self.node.send_mission(shelf, sku, priority)
-        # Add to queue table
         row = self.queue_table.rowCount()
         self.queue_table.insertRow(row)
         self.queue_table.setItem(row, 0, QTableWidgetItem(mid))
         self.queue_table.setItem(row, 1, QTableWidgetItem(shelf))
         self.queue_table.setItem(row, 2, QTableWidgetItem(sku))
         self.queue_table.setItem(row, 3, QTableWidgetItem(str(priority)))
-        self._on_log_update(f'Dispatched mission {mid} -> {shelf} [{sku}]')
+        self._on_log_update(f'Dispatched {mid} -> {shelf} [{sku}]')
 
     def _on_pause(self):
         self.node.send_estop()
@@ -639,38 +636,32 @@ class AtlasControlCenter(QMainWindow):
             self, 'Confirm RESET AGV',
             'This will:\n'
             '- Cancel active mission\n'
-            '- Stop robot\n'
+            '- Stop robot immediately\n'
             '- Clear all state\n'
-            '- Respawn at home dock\n\n'
+            '- Physically respawn at home dock\n'
+            '- Perform docking alignment verification\n'
+            '- Re-center on navigation tape\n'
+            '- Restore mission-ready state\n\n'
             'Continue?',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.node.send_reset_to_dock()
-            # Clear queue table
             self.queue_table.setRowCount(0)
-            self._on_log_update(
-                '*** RESET AGV: Robot returned to home dock ***')
+            self._on_log_update('*** RESET AGV: Physical reset + docking initiated ***')
 
 
 def main(args=None):
     rclpy.init(args=args)
-
     signals = SignalBridge()
     ros_node = AtlasRosNode(signals)
 
-    # Spin ROS in background thread
-    spin_thread = threading.Thread(
-        target=rclpy.spin, args=(ros_node,), daemon=True)
+    spin_thread = threading.Thread(target=rclpy.spin, args=(ros_node,), daemon=True)
     spin_thread.start()
 
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
-
     window = AtlasControlCenter(ros_node, signals)
     window.show()
-
     exit_code = app.exec_()
 
     ros_node.destroy_node()
