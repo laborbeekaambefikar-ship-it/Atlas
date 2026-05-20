@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>atlasarm6_gazebo</name>
+  <version>1.0.0</version>
+  <description>Gazebo simulation for AtlasArm-6</description>
+  <maintainer email="atlas@dev.local">atlas</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_ros2_control</exec_depend>
+  <exec_depend>atlasarm6_description</exec_depend>
+  <exec_depend>atlasarm6_control</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
