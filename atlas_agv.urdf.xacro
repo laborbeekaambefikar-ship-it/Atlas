@@ -1,0 +1,328 @@
+<?xml version="1.0"?>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     ATLAS AGV — Professional Industrial Mobile Robot
+     Inspired by MiR/OTTO/KUKA mobile platforms
+     
+     PHYSICS ARE LOCKED — do not change mass, inertia, wheel dimensions,
+     joint names, link names, or plugin configurations.
+     Only visual elements have been enhanced.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<robot name="atlas_agv" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- === Physical Parameters (DO NOT MODIFY) === -->
+  <xacro:property name="WR" value="0.05"/>
+  <xacro:property name="WT" value="0.04"/>
+  <xacro:property name="WS" value="0.30"/>
+  <xacro:property name="BX" value="0.30"/>
+  <xacro:property name="BY" value="0.25"/>
+  <xacro:property name="BZ" value="0.10"/>
+  <xacro:property name="BM" value="2.5"/>
+  <xacro:property name="WM" value="0.2"/>
+  <xacro:property name="CR" value="0.025"/>
+  <xacro:property name="PI" value="3.14159265359"/>
+
+  <!-- === Base Footprint (ground projection) === -->
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${WR}" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- === Main Chassis (modern industrial platform) === -->
+  <link name="base_link">
+    <!-- Main body — rounded chassis appearance via layered visuals -->
+    <visual name="chassis_main">
+      <origin xyz="0 0 ${BZ/2}"/>
+      <geometry><box size="${BX} ${BY} ${BZ}"/></geometry>
+      <material name="atlas_dark_gray"><color rgba="0.18 0.18 0.22 1"/></material>
+    </visual>
+    <!-- Top cover plate (lighter) -->
+    <visual name="top_plate">
+      <origin xyz="0 0 ${BZ + 0.005}"/>
+      <geometry><box size="${BX-0.02} ${BY-0.02} 0.01"/></geometry>
+      <material name="atlas_silver"><color rgba="0.5 0.52 0.55 1"/></material>
+    </visual>
+    <!-- Front bumper -->
+    <visual name="front_bumper">
+      <origin xyz="-${BX/2 - 0.01} 0 ${BZ/2}"/>
+      <geometry><box size="0.02 ${BY-0.04} ${BZ-0.02}"/></geometry>
+      <material name="atlas_orange"><color rgba="0.9 0.5 0.0 1"/></material>
+    </visual>
+    <!-- Rear bumper -->
+    <visual name="rear_bumper">
+      <origin xyz="${BX/2 - 0.01} 0 ${BZ/2}"/>
+      <geometry><box size="0.02 ${BY-0.04} ${BZ-0.02}"/></geometry>
+      <material name="atlas_orange2"><color rgba="0.9 0.5 0.0 1"/></material>
+    </visual>
+    <!-- Side panels (blue accent) -->
+    <visual name="side_left">
+      <origin xyz="0 ${BY/2 - 0.005} ${BZ/2}"/>
+      <geometry><box size="${BX-0.04} 0.01 ${BZ-0.02}"/></geometry>
+      <material name="atlas_blue"><color rgba="0.1 0.3 0.7 1"/></material>
+    </visual>
+    <visual name="side_right">
+      <origin xyz="0 -${BY/2 - 0.005} ${BZ/2}"/>
+      <geometry><box size="${BX-0.04} 0.01 ${BZ-0.02}"/></geometry>
+      <material name="atlas_blue2"><color rgba="0.1 0.3 0.7 1"/></material>
+    </visual>
+    <!-- Front headlights (white LED strips) -->
+    <visual name="headlight_L">
+      <origin xyz="-${BX/2} 0.08 ${BZ*0.7}"/>
+      <geometry><box size="0.005 0.04 0.015"/></geometry>
+      <material name="led_white"><color rgba="1.0 1.0 0.95 1"/></material>
+    </visual>
+    <visual name="headlight_R">
+      <origin xyz="-${BX/2} -0.08 ${BZ*0.7}"/>
+      <geometry><box size="0.005 0.04 0.015"/></geometry>
+      <material name="led_white2"><color rgba="1.0 1.0 0.95 1"/></material>
+    </visual>
+    <!-- Rear tail lights (red) -->
+    <visual name="taillight_L">
+      <origin xyz="${BX/2} 0.08 ${BZ*0.7}"/>
+      <geometry><box size="0.005 0.04 0.015"/></geometry>
+      <material name="led_red"><color rgba="0.9 0.0 0.0 1"/></material>
+    </visual>
+    <visual name="taillight_R">
+      <origin xyz="${BX/2} -0.08 ${BZ*0.7}"/>
+      <geometry><box size="0.005 0.04 0.015"/></geometry>
+      <material name="led_red2"><color rgba="0.9 0.0 0.0 1"/></material>
+    </visual>
+    <!-- Status LED strip (top, green = operational) -->
+    <visual name="status_led">
+      <origin xyz="0 0 ${BZ + 0.015}"/>
+      <geometry><box size="0.12 0.01 0.005"/></geometry>
+      <material name="led_green"><color rgba="0.0 0.9 0.3 1"/></material>
+    </visual>
+    <!-- ID panel / branding -->
+    <visual name="id_panel">
+      <origin xyz="0 ${BY/2 + 0.001} ${BZ*0.75}"/>
+      <geometry><box size="0.10 0.001 0.04"/></geometry>
+      <material name="atlas_brand"><color rgba="0.95 0.95 0.95 1"/></material>
+    </visual>
+
+    <!-- Collision (unchanged) -->
+    <collision>
+      <origin xyz="0 0 ${BZ/2}"/>
+      <geometry><box size="${BX} ${BY} ${BZ}"/></geometry>
+    </collision>
+    <!-- Inertial (unchanged) -->
+    <inertial>
+      <mass value="${BM}"/>
+      <inertia ixx="${BM*(BY*BY+BZ*BZ)/12}" ixy="0" ixz="0"
+               iyy="${BM*(BX*BX+BZ*BZ)/12}" iyz="0"
+               izz="${BM*(BX*BX+BY*BY)/12}"/>
+    </inertial>
+  </link>
+
+
+  <!-- === Sensor Tower (Lidar + Camera + RFID antenna) === -->
+  <link name="sensor_tower">
+    <!-- Lidar housing (cylindrical, dark) -->
+    <visual name="lidar_housing">
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.04" length="0.04"/></geometry>
+      <material name="lidar_mat"><color rgba="0.1 0.1 0.12 1"/></material>
+    </visual>
+    <!-- Lidar dome (slightly transparent look) -->
+    <visual name="lidar_dome">
+      <origin xyz="0 0 0.055"/>
+      <geometry><cylinder radius="0.035" length="0.01"/></geometry>
+      <material name="lidar_glass"><color rgba="0.2 0.2 0.25 0.8"/></material>
+    </visual>
+    <!-- Camera housing -->
+    <visual name="camera_housing">
+      <origin xyz="-0.03 0 0.01"/>
+      <geometry><box size="0.025 0.04 0.025"/></geometry>
+      <material name="cam_mat"><color rgba="0.12 0.12 0.15 1"/></material>
+    </visual>
+    <!-- Camera lens -->
+    <visual name="camera_lens">
+      <origin xyz="-0.044 0 0.01"/>
+      <geometry><cylinder radius="0.008" length="0.005"/></geometry>
+      <material name="lens_mat"><color rgba="0.05 0.05 0.1 1"/></material>
+    </visual>
+  </link>
+  <joint name="sensor_tower_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="sensor_tower"/>
+    <origin xyz="-0.08 0 ${BZ}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- === RFID Antenna Housing === -->
+  <link name="rfid_antenna">
+    <visual name="rfid_box">
+      <geometry><box size="0.06 0.08 0.015"/></geometry>
+      <material name="rfid_mat"><color rgba="0.15 0.15 0.2 1"/></material>
+    </visual>
+    <visual name="rfid_indicator">
+      <origin xyz="0 0 0.01"/>
+      <geometry><cylinder radius="0.005" length="0.005"/></geometry>
+      <material name="rfid_led"><color rgba="0.0 0.5 1.0 1"/></material>
+    </visual>
+  </link>
+  <joint name="rfid_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="rfid_antenna"/>
+    <origin xyz="0 0 -0.01" rpy="0 0 0"/>
+  </joint>
+
+  <!-- === Safety Scanner Housings (front + rear) === -->
+  <link name="safety_scanner_front">
+    <visual>
+      <geometry><box size="0.02 0.1 0.025"/></geometry>
+      <material name="scanner_mat"><color rgba="0.15 0.15 0.18 1"/></material>
+    </visual>
+    <visual name="scanner_window">
+      <origin xyz="-0.011 0 0"/>
+      <geometry><box size="0.002 0.08 0.02"/></geometry>
+      <material name="scanner_glass"><color rgba="0.1 0.1 0.4 0.6"/></material>
+    </visual>
+  </link>
+  <joint name="scanner_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="safety_scanner_front"/>
+    <origin xyz="-${BX/2 + 0.01} 0 ${BZ/2}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="safety_scanner_rear">
+    <visual>
+      <geometry><box size="0.02 0.1 0.025"/></geometry>
+      <material name="scanner_mat_r"><color rgba="0.15 0.15 0.18 1"/></material>
+    </visual>
+  </link>
+  <joint name="scanner_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="safety_scanner_rear"/>
+    <origin xyz="${BX/2 + 0.01} 0 ${BZ/2}" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- === Drive Wheels (industrial rubber with hub detail) === -->
+  <xacro:macro name="wheel" params="name y_sign">
+    <link name="${name}_wheel">
+      <!-- Tire -->
+      <visual name="tire">
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${WR}" length="${WT}"/></geometry>
+        <material name="tire_rubber"><color rgba="0.08 0.08 0.08 1"/></material>
+      </visual>
+      <!-- Hub cap -->
+      <visual name="hub">
+        <origin xyz="0 ${y_sign*WT/2} 0" rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${WR*0.5}" length="0.005"/></geometry>
+        <material name="hub_metal"><color rgba="0.5 0.5 0.55 1"/></material>
+      </visual>
+      <collision>
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${WR}" length="${WT}"/></geometry>
+      </collision>
+      <inertial>
+        <mass value="${WM}"/>
+        <inertia ixx="${WM*(3*WR*WR+WT*WT)/12}" ixy="0" ixz="0"
+                 iyy="${WM*(3*WR*WR+WT*WT)/12}" iyz="0"
+                 izz="${WM*WR*WR/2}"/>
+      </inertial>
+    </link>
+    <joint name="${name}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${name}_wheel"/>
+      <origin xyz="0 ${y_sign*WS/2} 0"/>
+      <axis xyz="0 1 0"/>
+      <dynamics damping="0.5" friction="0.3"/>
+    </joint>
+    <gazebo reference="${name}_wheel">
+      <mu1>1.5</mu1><mu2>1.0</mu2>
+      <kp>1e6</kp><kd>10</kd>
+      <minDepth>0.001</minDepth>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel name="left" y_sign="1"/>
+  <xacro:wheel name="right" y_sign="-1"/>
+
+  <!-- === Caster Wheel (swivel housing) === -->
+  <link name="caster_wheel">
+    <visual name="caster_ball">
+      <geometry><sphere radius="${CR}"/></geometry>
+      <material name="caster_mat"><color rgba="0.4 0.4 0.45 1"/></material>
+    </visual>
+    <visual name="caster_mount">
+      <origin xyz="0 0 ${CR + 0.005}"/>
+      <geometry><cylinder radius="0.015" length="0.01"/></geometry>
+      <material name="caster_mount_mat"><color rgba="0.3 0.3 0.35 1"/></material>
+    </visual>
+    <collision><geometry><sphere radius="${CR}"/></geometry></collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_wheel"/>
+    <origin xyz="0.12 0 ${CR-WR}"/>
+  </joint>
+  <gazebo reference="caster_wheel">
+    <mu1>0.0</mu1><mu2>0.0</mu2>
+  </gazebo>
+
+
+  <!-- === IMU Sensor (LOCKED — do not modify plugin) === -->
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/>
+    <origin xyz="0 0 ${BZ/2}"/>
+  </joint>
+  <gazebo reference="imu_link">
+    <sensor name="atlas_imu" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros><namespace>/atlas</namespace>
+        <remapping>~/out:=imu</remapping></ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- === Diff Drive Plugin (LOCKED — do not modify) === -->
+  <gazebo>
+    <plugin name="atlas_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros><namespace>/atlas</namespace></ros>
+      <update_rate>50</update_rate>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${WS}</wheel_separation>
+      <wheel_diameter>${2*WR}</wheel_diameter>
+      <max_wheel_torque>5.0</max_wheel_torque>
+      <max_wheel_acceleration>2.0</max_wheel_acceleration>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+    </plugin>
+  </gazebo>
+
+  <!-- === Gazebo Visual Materials === -->
+  <gazebo reference="base_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+  <gazebo reference="sensor_tower">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="rfid_antenna">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="safety_scanner_front">
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="safety_scanner_rear">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+</robot>
