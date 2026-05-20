@@ -130,8 +130,11 @@ sudo apt install -y -qq \
     ros-humble-joint-trajectory-controller \
     ros-humble-position-controllers \
     ros-humble-robot-state-publisher \
-    ros-humble-trac-ik-kinematics-plugin \
     ros-humble-xacro
+
+# TRAC-IK is optional (KDL is the default kinematics solver)
+sudo apt install -y -qq ros-humble-trac-ik-kinematics-plugin 2>/dev/null || \
+    print_w "TRAC-IK not available — using KDL solver (default, works fine)"
 
 print_s "All ROS2 packages installed"
 
