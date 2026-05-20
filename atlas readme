@@ -1,0 +1,247 @@
+ ATLAS Warehouse AGV — Project State
+
+## Project Overview
+
+| Item | Value |
+|------|-------|
+| Name | ATLAS Fleet Warehouse AGV |
+| Platform | Ubuntu 22.04 |
+| ROS | ROS2 Humble |
+| Simulator | Gazebo Classic 11 |
+| Visualization | RViz2 |
+| Language | Python 3.10 |
+| Workspace | `~/atlas_ws` |
+| Branch | `atlas-fleet-system` |
+| Repo | `laborbeekaambefikar-ship-it/my-project` |
+
+## Architecture
+
+### Packages
+
+| Package | Type | Purpose |
+|---------|------|---------|
+| `atlas_interfaces` | ament_cmake | Custom messages (FleetMission, RobotState, ShelfTag) |
+| `atlas_description` | ament_cmake | URDF/Xacro, RViz config |
+| `atlas_gazebo` | ament_cmake | Warehouse world file |
+| `atlas_navigation` | ament_python | Line sensor, line follower, turn controller, tag detector |
+| `atlas_mission_manager` | ament_python | Mission FSM, velocity arbiter, CLI sender, GUI |
+| `atlas_bringup` | ament_cmake | Master launch file |
+
+### Nodes
+
+| Node | Package | Executable | Purpose |
+|------|---------|------------|---------|
+| atlas_line_sensor | atlas_navigation | line_sensor | 8-channel virtual IR sensor at 50Hz |
+| atlas_line_follower | atlas_navigation | line_follower | PID line following, publishes `/atlas/nav_vel` |
+| atlas_turn_ctrl | atlas_navigation | turn_controller | IMU-based turn, publishes `/atlas/turn_vel` |
+| atlas_tag_detect | atlas_navigation | tag_detector | Simulated RFID tag detection |
+| atlas_mission_mgr | atlas_mission_manager | mission_node | FSM + sole `/atlas/cmd_vel` publisher |
+| atlas_gui | atlas_mission_manager | atlas_gui | GUI (currently broken) |
+
+### Topics
+
+| Topic | Type | Publisher | Purpose |
+|-------|------|-----------|---------|
+| `/atlas/odom` | nav_msgs/Odometry | gazebo diff_drive | Robot odometry |
+| `/atlas/imu` | sensor_msgs/Imu | gazebo imu plugin | IMU data |
+| `/atlas/cmd_vel` | geometry_msgs/Twist | mission_node ONLY | Wheel commands |
+| `/atlas/nav_vel` | geometry_msgs/Twist | line_follower | Line-following velocity |
+| `/atlas/turn_vel` | geometry_msgs/Twist | turn_controller | Turn velocity |
+| `/atlas/turn_cmd` | std_msgs/Float32 | mission_node | Turn angle command |
+| `/atlas/turn_done` | std_msgs/Empty | turn_controller | Turn complete signal |
+| `/atlas/junction` | std_msgs/Empty | line_sensor | Junction detected |
+| `/atlas/line_sensors` | std_msgs/Int8MultiArray | line_sensor | 8-bit binary sensor |
+| `/atlas/line_raw` | std_msgs/Float32MultiArray | line_sensor | Raw distances |
+| `/atlas/tag_event` | atlas_interfaces/ShelfTag | tag_detector | RFID detection |
+| `/atlas/mission_cmd` | atlas_interfaces/FleetMission | GUI/CLI | New mission |
+| `/atlas/robot_state` | atlas_interfaces/RobotState | mission_node | Live status |
+| `/atlas/log` | std_msgs/String | mission_node | Event log |
+| `/atlas/estop` | std_msgs/Empty | GUI/CLI | Emergency stop |
+| `/atlas/reset` | std_msgs/Empty | GUI/CLI | Reset e-stop |
+| `/atlas/reset_to_dock` | std_msgs/Empty | GUI/CLI | Reset AGV to home |
+
+### Services Used
+
+| Service | Purpose |
+|---------|---------|
+| `/set_entity_state` | Reset AGV position (gazebo_msgs/SetEntityState) |
+| `/spawn_entity` | Initial robot spawn |
+
+### Launch File
+
+- `atlas_bringup/launch/atlas_full.launch.py` — single command launches everything
+
+### Folder Structure
+
+```
+~/atlas_ws/src/
+├── atlas_interfaces/
+│   ├── msg/
+│   │   ├── FleetMission.msg
+│   │   ├── RobotState.msg
+│   │   └── ShelfTag.msg
+│   ├── CMakeLists.txt
+│   └── package.xml
+├── atlas_description/
+│   ├── urdf/atlas_agv.urdf.xacro
+│   ├── rviz/atlas.rviz
+│   └── ...
+├── atlas_gazebo/
+│   ├── worlds/warehouse.world
+│   └── ...
+├── atlas_navigation/
+│   └── atlas_navigation/
+│       ├── line_sensor.py
+│       ├── line_follower.py
+│       ├── turn_controller.py
+│       └── tag_detector.py
+├── atlas_mission_manager/
+│   └── atlas_mission_manager/
+│       ├── mission_node.py
+│       ├── send_mission.py
+│       ├── atlas_gui.py (BROKEN)
+│       └── atlas_control_center.py (NOT YET INSTALLED)
+└── atlas_bringup/
+    └── launch/atlas_full.launch.py
+```
+
+## Working Features
+
+- Gazebo launches warehouse world correctly
+- AGV spawns once at home dock (0, 0, yaw=90deg)
+- No double-spawn or teleportation
+- Diff-drive plugin publishes odom at 50Hz
+- Odom frame = world frame (no transform needed)
+- TF tree: odom -> base_footprint -> base_link
+- 8-channel virtual line sensor detects guide tape
+- PID line follower tracks spine and aisles
+- IMU-based turn controller (90deg and 180deg turns)
+- RFID tag detection with arm/disarm logic
+- Mission FSM: IDLE -> NAV_SPINE -> TURNING -> NAV_AISLE -> AT_SHELF -> PICKUP -> PIVOT -> RET_AISLE -> RET_TURN -> RET_SPINE -> DOCKED
+- Junction counting for aisle selection
+- Return-to-home with correct LEFT turn at spine junction
+- E-Stop and Reset via topics
+- Reset-to-dock via `/atlas/reset_to_dock` (calls Gazebo set_entity_state)
+- CLI mission sender: `ros2 run atlas_mission_manager send_mission S05`
+- RViz config with robot model, TF, odometry display
+
+## Known Problems
+
+| Problem | Status | Notes |
+|---------|--------|-------|
+| GUI (atlas_gui.py) | BROKEN | Repeated syntax errors from terminal paste corruption |
+| atlas_control_center.py | NOT INSTALLED | File exists in repo but was never successfully downloaded to user machine |
+| RFID visual markers | INCOMPLETE | World file missing blue floor pads at tag positions |
+| Warehouse visuals | BASIC | Enhanced version exists but RFID markers not added |
+
+### Root Cause of GUI Failures
+
+Every attempt to create the GUI file was corrupted by the terminal/shell when pasting multi-line Python strings. Methods that failed:
+- `cat << 'EOF'` heredocs
+- `python3 -c "..."` inline scripts
+- `nano` paste (string split across lines)
+- `sed` replacements
+- base64 encoding
+
+The only reliable method is to deliver the file via a mechanism that bypasses the terminal entirely (e.g., GitHub download, scp, or file manager).
+
+## GUI Requirements
+
+The GUI (`atlas_control_center.py`) must provide:
+
+- Create Mission button with shelf/SKU/priority dialog
+- Emergency Stop button
+- Reset E-Stop button
+- Reset AGV to Dock button (with confirmation dialog)
+- Live status panel: State, Mission, Target, Battery, Velocity, Position, Heading, RFID
+- Warehouse map with real-time robot position and trail
+- Mission queue table
+- Statistics (total/completed missions)
+- Scrollable timestamped event log
+- Clear log button
+- Dark industrial theme
+- Connects to existing `/atlas/*` topics
+- Never crashes on missing topics
+- Exception handling on all callbacks
+
+## Reset AGV Requirements
+
+When `/atlas/reset_to_dock` is received by mission_node:
+
+1. Log "RESET REQUESTED"
+2. Cancel active mission
+3. Stop robot (publish zero Twist)
+4. Clear mission queue
+5. Reset all internal state variables
+6. Call Gazebo `/set_entity_state` to place robot at (0, 0, 0.01, yaw=90deg)
+7. Set state to IDLE
+8. Log "ROBOT RETURNED TO HOME"
+9. Log "SYSTEM READY"
+
+CLI alternative: `ros2 topic pub /atlas/reset_to_dock std_msgs/msg/Empty "{}" --once`
+
+## Environment Improvements (Desired)
+
+- Multi-level shelf racks with boxes
+- Yellow safety lane stripes along navigation paths
+- RFID gate posts at aisle entrances
+- Blue RFID floor markers ON the aisle tape at (sx, ay) positions
+- Guard rails and bollards
+- Charging station model
+- Loading dock area
+- Ceiling lights
+- Information board
+- Fire extinguisher
+- Professional wall textures
+- Improved Gazebo lighting and shadows
+
+## Constraints
+
+**DO NOT MODIFY:**
+- `line_sensor.py` — working navigation sensor
+- `line_follower.py` — working PID controller
+- `turn_controller.py` — working IMU turn control
+- `tag_detector.py` — working RFID system
+- `mission_node.py` — working FSM and velocity arbiter
+- `atlas_agv.urdf.xacro` — working robot model
+- `atlas_full.launch.py` — working launch sequence
+- Guide tape positions in world (spine x=0 y=0-12, aisles y=2,4,6,8,10 x=0-5)
+- Topic names and message types
+- Spawn position (0, 0, 0.01, yaw=1.5708)
+- Odom = world assumption (no transform)
+
+## Development Priorities
+
+1. **GUI** — Replace broken atlas_gui.py with working atlas_control_center.py
+2. **Reset AGV** — Already implemented in mission_node.py, needs GUI button
+3. **RFID visual markers** — Add blue pads to world at (sx, ay) on tape
+4. **Environment visuals** — Enhanced warehouse appearance
+
+## Current Launch Procedure
+
+```bash
+# Build
+cd ~/atlas_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+
+# Launch everything (kill old Gazebo first)
+pkill -9 -f gzserver 2>/dev/null
+pkill -9 -f gzclient 2>/dev/null
+sleep 2
+ros2 launch atlas_bringup atlas_full.launch.py
+
+# Send mission (separate terminal)
+source ~/atlas_ws/install/setup.bash
+ros2 run atlas_mission_manager send_mission S05
+
+# Reset AGV if stuck (separate terminal)
+source ~/atlas_ws/install/setup.bash
+ros2 topic pub /atlas/reset_to_dock std_msgs/msg/Empty "{}" --once
+
+# Monitor
+ros2 topic echo /atlas/robot_state
+ros2 topic echo /atlas/log
+ros2 topic echo /atlas/line_sensors
+ros2 topic echo /atlas/odom --once
