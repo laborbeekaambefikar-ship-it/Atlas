@@ -446,13 +446,14 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import Command, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     pkg = FindPackageShare('atlasarm_description')
     xacro_file = PathJoinSubstitution([pkg, 'urdf', 'atlasarm6.urdf.xacro'])
     rviz_cfg = PathJoinSubstitution([pkg, 'rviz', 'atlasarm6.rviz'])
-    robot_desc = Command(['xacro ', xacro_file])
+    robot_desc = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
     return LaunchDescription([
         Node(
@@ -950,6 +951,7 @@ from launch.actions import ExecuteProcess, RegisterEventHandler, TimerAction
 from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 from launch.substitutions import Command
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -959,7 +961,7 @@ def generate_launch_description():
 
     xacro_file = os.path.join(desc_pkg, 'urdf', 'atlasarm6.urdf.xacro')
     world_file = os.path.join(gz_pkg, 'worlds', 'atlasarm6_workspace.world')
-    robot_desc = Command(['xacro ', xacro_file])
+    robot_desc = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
     rsp = Node(
         package='robot_state_publisher',
