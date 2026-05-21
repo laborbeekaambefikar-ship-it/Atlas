@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>agvpicker_moveit_config</name>
+  <version>1.0.0</version>
+  <description>MoveIt2 configuration for AGVPicker</description>
+  <maintainer email="agvpicker@dev.local">atlas</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>moveit_ros_planning_interface</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>moveit_kinematics</exec_depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
+  <exec_depend>moveit_simple_controller_manager</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>agvpicker_description</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
