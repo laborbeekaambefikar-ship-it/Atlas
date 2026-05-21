@@ -43,6 +43,7 @@ The installer creates several helper scripts at `~/atlasarm6_ws/`:
 | `run_display.sh` | View robot in RViz with joint sliders |
 | `run_gazebo.sh` | Launch arm in Gazebo (controllers only) |
 | `run_full.sh` | Full system: Gazebo + MoveIt2 + RViz |
+| `run_sliders.sh` | rqt slider GUI for joint control (created by `fix_atlasarm6.sh`) |
 | `run_joint_test.sh` | Test all 6 joints with sinusoidal motion |
 | `run_demo.sh` | Pick-and-place demonstration |
 | `rebuild.sh` | Clean rebuild of workspace |
@@ -125,6 +126,31 @@ ros2 run atlasarm_examples send_task --pick 0.4 0.0 0.45 --place 0.4 0.3 0.45
 ```
 
 ## Troubleshooting
+
+### Logs say "complete" but the arm never moves, MoveIt never opens, and there's no GUI to drive the joints
+
+Run the fix patch — it addresses all three at once:
+
+```bash
+wget https://raw.githubusercontent.com/laborbeekaambefikar-ship-it/Atlas/atlasarm6-fixes/atlasarm6_install/fix_atlasarm6.sh
+bash fix_atlasarm6.sh
+```
+
+What it does:
+- Patches `joint_test.py` and `pick_and_place_demo.py` so they wait for the controller to subscribe before publishing (the original demos publish into the void and report success).
+- Replaces the RViz config used by `run_full.sh` with one that actually contains the MoveIt **MotionPlanning** panel, so you can plan and execute motions from RViz.
+- Replaces the fixed 8s/10s `TimerAction`s in `atlasarm6_full.launch.py` with `OnProcessExit` event handlers, so MoveIt + RViz launch only after the controllers are loaded — no more race on slow first starts.
+- Installs `rqt_joint_trajectory_controller` and adds `~/atlasarm6_ws/run_sliders.sh` so you can drive the arm with sliders without needing MoveIt at all.
+
+After running it, re-source the workspace:
+
+```bash
+source ~/atlasarm6_ws/install/setup.bash
+~/atlasarm6_ws/run_full.sh        # full Gazebo + MoveIt RViz
+# or
+~/atlasarm6_ws/run_gazebo.sh      # then in another terminal:
+~/atlasarm6_ws/run_sliders.sh     # 6-axis slider GUI
+```
 
 ### "Command not found: ros2"
 
