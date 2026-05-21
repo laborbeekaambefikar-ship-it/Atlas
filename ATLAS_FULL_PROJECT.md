@@ -2597,366 +2597,73 @@ def generate_launch_description():
 ---
 ## FILE: src/atlas_mission_manager/atlas_mission_manager/atlas_gui.py
 ```
-import sys
-import math
-import threading
-import uuid
-from datetime import datetime
+#!/usr/bin/env python3
+"""ATLAS Warehouse Fleet Control Center - entry point.
 
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Empty, String
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from atlas_interfaces.msg import FleetMission, RobotState, ShelfTag
+Brand-new replacement GUI for the ATLAS Warehouse AGV.
 
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QPointF, QRectF
-from PyQt5.QtGui import QPainter, QColor, QFont, QPen, QBrush
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QLabel, QPushButton, QGroupBox, QTableWidget,
-    QTableWidgetItem, QTextEdit, QComboBox, QSpinBox, QDialog,
-)
+Registered as the ``atlas_gui`` console script in
+``atlas_mission_manager/setup.py`` and launched automatically by
+``atlas_bringup/launch/atlas_full.launch.py``.
 
-DARK_STYLE = """
-QMainWindow { background-color: #1a1a2e; }
-QWidget { background-color: #1a1a2e; color: #e0e0e0; font-family: Arial; }
-QGroupBox { border: 1px solid #3a3a5c; border-radius: 6px; margin-top: 12px; padding-top: 14px; font-weight: bold; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #00d4aa; }
-QPushButton { background-color: #2d2d4a; border: 1px solid #4a4a6a; border-radius: 4px; padding: 8px 16px; min-height: 28px; }
-QPushButton:hover { background-color: #3d3d5a; border-color: #00d4aa; }
-QPushButton:pressed { background-color: #00d4aa; color: #1a1a2e; }
-QTableWidget { background-color: #16213e; border: 1px solid #3a3a5c; }
-QHeaderView::section { background-color: #2d2d4a; border: 1px solid #3a3a5c; padding: 6px; }
-QTextEdit { background-color: #0f0f23; border: 1px solid #3a3a5c; font-family: monospace; font-size: 10px; }
-QProgressBar { border: 1px solid #3a3a5c; border-radius: 3px; text-align: center; background-color: #16213e; }
-QProgressBar::chunk { background-color: #00d4aa; border-radius: 2px; }
-QComboBox, QSpinBox { background-color: #2d2d4a; border: 1px solid #4a4a6a; border-radius: 4px; padding: 4px; }
+Design goals
+------------
+* Never crash on missing topics, missing messages, or restarted nodes.
+* All Qt widgets are mutated only on the Qt main thread; the rclpy
+  spinner runs in a daemon thread and forwards data via Qt signals.
+* Subscriptions are recreated transparently after a node restart -
+  rclpy/DDS handles re-discovery, so we only have to keep the GUI
+  process alive and wrap every callback in a try/except.
+* Zero modifications to navigation, RFID, mission manager or Gazebo
+  systems - communication uses the existing ``/atlas/*`` topics only.
 """
 
-class RosBridge(QObject):
-    state_sig = pyqtSignal(object)
-    odom_sig = pyqtSignal(float, float, float, float, float)
-    log_sig = pyqtSignal(str)
+import signal
+import sys
 
-    def __init__(self):
-        super().__init__()
-        rclpy.init()
-        self.node = rclpy.create_node("atlas_gui")
-        self.node.create_subscription(RobotState, "/atlas/robot_state", self._st, 10)
-        self.node.create_subscription(Odometry, "/atlas/odom", self._od, 10)
-        self.node.create_subscription(String, "/atlas/log", self._lg, 50)
-        self.pub_mission = self.node.create_publisher(FleetMission, "/atlas/mission_cmd", 10)
-        self.pub_estop = self.node.create_publisher(Empty, "/atlas/estop", 10)
-        self.pub_reset_dock = self.node.create_publisher(Empty, "/atlas/reset_to_dock", 10)
-        self.pub_reset = self.node.create_publisher(Empty, "/atlas/reset", 10)
-        self._stop = False
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._thread.start()
+from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import QApplication
 
-    def _spin(self):
-        while rclpy.ok() and not self._stop:
-            rclpy.spin_once(self.node, timeout_sec=0.05)
-
-    def _st(self, msg):
-        self.state_sig.emit(msg)
-
-    def _od(self, msg):
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        vx = msg.twist.twist.linear.x
-        wz = msg.twist.twist.angular.z
-        self.odom_sig.emit(x, y, yaw, vx, wz)
-
-    def _lg(self, msg):
-        self.log_sig.emit(msg.data)
-
-    def send_mission(self, shelf, sku, priority):
-        m = FleetMission()
-        m.mission_id = "gui-" + uuid.uuid4().hex[:6]
-        m.target_shelf = shelf
-        m.sku = sku
-        m.priority = priority
-        self.pub_mission.publish(m)
-        return m.mission_id
-
-    def send_estop(self):
-        self.pub_estop.publish(Empty())
-
-    def send_reset(self):
-        self.pub_reset.publish(Empty())
-
-    def send_reset_to_dock(self):
-        self.pub_reset_dock.publish(Empty())
+from atlas_mission_manager.gui.main_window import MainWindow
+from atlas_mission_manager.gui.ros_bridge import RosBridge
+from atlas_mission_manager.gui.theme import APP_STYLESHEET
 
 
-    def shutdown(self):
-        self._stop = True
-        self.node.destroy_node()
-        rclpy.shutdown()
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv
 
-class WarehouseMap(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumSize(400, 400)
-        self.robot_x = 0.0
-        self.robot_y = 0.0
-        self.robot_yaw = math.pi / 2
-        self.trail = []
+    # Allow Ctrl+C in the launching terminal to terminate the process.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    def update_robot(self, x, y, yaw):
-        self.robot_x = x
-        self.robot_y = y
-        self.robot_yaw = yaw
-        self.trail.append((x, y))
-        if len(self.trail) > 500:
-            self.trail = self.trail[-500:]
-        self.update()
+    app = QApplication(argv)
+    app.setApplicationName("ATLAS Fleet Control")
+    app.setStyleSheet(APP_STYLESHEET)
 
-    def _w2s(self, wx, wy):
-        margin = 30
-        w = self.width() - 2 * margin
-        h = self.height() - 2 * margin
-        sx = margin + (wx + 2) / 14.0 * w
-        sy = margin + (1.0 - (wy + 1) / 14.0) * h
-        return sx, sy
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor("#0f0f23"))
-        x1, y1 = self._w2s(-2, -1)
-        x2, y2 = self._w2s(12, 13)
-        p.fillRect(QRectF(x1, y2, x2 - x1, y1 - y2), QColor("#1c1c3a"))
-        p.setPen(QPen(QColor("#ffaa00"), 3))
-        sx1, sy1 = self._w2s(0, 0)
-        sx2, sy2 = self._w2s(0, 12)
-        p.drawLine(int(sx1), int(sy1), int(sx2), int(sy2))
-        p.setPen(QPen(QColor("#ffaa00"), 2))
-        for ay in [2, 4, 6, 8, 10]:
-            ax1, ay1 = self._w2s(0, ay)
-            ax2, ay2 = self._w2s(5, ay)
-            p.drawLine(int(ax1), int(ay1), int(ax2), int(ay2))
-        hx, hy = self._w2s(0, 0)
-        p.setPen(QPen(QColor("#00ff88"), 2))
-        p.setBrush(QBrush(QColor("#004422")))
-        p.drawEllipse(QPointF(hx, hy), 12, 12)
-        p.setPen(QColor("#00ff88"))
-        p.setFont(QFont("Arial", 7))
-        p.drawText(QRectF(hx - 15, hy - 8, 30, 16), Qt.AlignCenter, "HOME")
-        if len(self.trail) > 1:
-            p.setPen(QPen(QColor(0, 212, 170, 80), 2))
-            for i in range(1, len(self.trail)):
-                t1x, t1y = self._w2s(*self.trail[i - 1])
-                t2x, t2y = self._w2s(*self.trail[i])
-                p.drawLine(int(t1x), int(t1y), int(t2x), int(t2y))
-        rx, ry = self._w2s(self.robot_x, self.robot_y)
-        p.setPen(QPen(QColor("#00d4aa"), 2))
-        p.setBrush(QBrush(QColor("#006655")))
-        p.drawEllipse(QPointF(rx, ry), 10, 10)
-        arrow_len = 18
-        ax = rx + arrow_len * math.cos(-self.robot_yaw + math.pi / 2)
-        ay_s = ry + arrow_len * math.sin(-self.robot_yaw + math.pi / 2)
-        p.setPen(QPen(QColor("#00ffcc"), 2))
-        p.drawLine(int(rx), int(ry), int(ax), int(ay_s))
-        p.end()
-
-class MissionDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Create Mission")
-        self.setStyleSheet(DARK_STYLE)
-        layout = QFormLayout(self)
-        self.shelf_combo = QComboBox()
-        for i in range(1, 21):
-            self.shelf_combo.addItem("S%02d" % i)
-        layout.addRow("Target Shelf:", self.shelf_combo)
-        self.sku_combo = QComboBox()
-        self.sku_combo.addItems(["SKU-001", "SKU-002", "SKU-003", "SKU-004", "SKU-005"])
-        layout.addRow("SKU:", self.sku_combo)
-        self.prio_spin = QSpinBox()
-        self.prio_spin.setRange(0, 3)
-        self.prio_spin.setValue(1)
-        layout.addRow("Priority:", self.prio_spin)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        layout.addRow(bb)
-
-    def get_values(self):
-        return (self.shelf_combo.currentText(), self.sku_combo.currentText(), self.prio_spin.value())
-
-class AtlasConsole(QMainWindow):
-    def __init__(self, bridge):
-        super().__init__()
-        self.bridge = bridge
-        self.setWindowTitle("ATLAS Fleet Management Console")
-        self.setMinimumSize(1280, 720)
-        self.setStyleSheet(DARK_STYLE)
-        self._build_ui()
-        bridge.state_sig.connect(self._on_state)
-        bridge.odom_sig.connect(self._on_odom)
-        bridge.log_sig.connect(self._on_log)
-        self.mission_count = 0
-        self.completed_count = 0
-
-    def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        main_layout.setSpacing(8)
-        left = QVBoxLayout()
-        left.setSpacing(6)
-        header = QLabel("ATLAS FLEET")
-        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #00d4aa;")
-        header.setAlignment(Qt.AlignCenter)
-        left.addWidget(header)
-        status_group = QGroupBox("Robot Status")
-        sg = QGridLayout(status_group)
-        self.labels = {}
-        fields = [("State", "IDLE"), ("Mission", "-"), ("Target", "-"),
-                  ("Battery", "100%"), ("Velocity", "0.00 m/s"),
-                  ("Position", "(0.00, 0.00)"), ("Heading", "90.0"),
-                  ("Last RFID", "-"), ("Nav Status", "READY")]
-        for i, (name, default) in enumerate(fields):
-            lbl = QLabel(name + ":")
-            lbl.setStyleSheet("color: #888;")
-            val = QLabel(default)
-            val.setStyleSheet("color: #00d4aa; font-weight: bold;")
-            sg.addWidget(lbl, i, 0)
-            sg.addWidget(val, i, 1)
-            self.labels[name] = val
-        left.addWidget(status_group)
-        bat_group = QGroupBox("Battery")
-        bl = QVBoxLayout(bat_group)
-        self.bat_bar = QProgressBar()
-        self.bat_bar.setValue(100)
-        self.bat_bar.setFormat("%v%")
-        bl.addWidget(self.bat_bar)
-        left.addWidget(bat_group)
-        left.addStretch()
-        center = QVBoxLayout()
-        map_group = QGroupBox("Warehouse Map")
-        ml = QVBoxLayout(map_group)
-        self.map_widget = WarehouseMap()
-        ml.addWidget(self.map_widget)
-        center.addWidget(map_group)
-        log_group = QGroupBox("Event Log")
-        ll = QVBoxLayout(log_group)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(150)
-        ll.addWidget(self.log_text)
-        center.addWidget(log_group)
-        right = QVBoxLayout()
-        right.setSpacing(6)
-        ctrl_group = QGroupBox("Mission Control")
-        cl = QVBoxLayout(ctrl_group)
-        btn_mission = QPushButton("Create Mission")
-        btn_mission.clicked.connect(self._create_mission)
-        cl.addWidget(btn_mission)
-        btn_estop = QPushButton("EMERGENCY STOP")
-        btn_estop.setStyleSheet("background-color: #cc2222; border-color: #ff4444; font-weight: bold;")
-        btn_estop.clicked.connect(self.bridge.send_estop)
-        cl.addWidget(btn_estop)
-        btn_reset = QPushButton("Reset E-Stop")
-        btn_reset.clicked.connect(self.bridge.send_reset)
-        cl.addWidget(btn_reset)
-        btn_dock_reset = QPushButton('RESET AGV')
-        btn_dock_reset.setStyleSheet('background-color: #884400; border-color: #ff8800; font-weight: bold;')
-        btn_dock_reset.clicked.connect(self._reset_agv)
-        cl.addWidget(btn_dock_reset)
-
-        right.addWidget(ctrl_group)
-        queue_group = QGroupBox("Mission Queue")
-        ql = QVBoxLayout(queue_group)
-        self.queue_table = QTableWidget(0, 3)
-        self.queue_table.setHorizontalHeaderLabels(["ID", "Shelf", "Status"])
-        self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.queue_table.setMaximumHeight(200)
-        ql.addWidget(self.queue_table)
-        right.addWidget(queue_group)
-        right.addStretch()
-        main_layout.addLayout(left, 1)
-        main_layout.addLayout(center, 3)
-        main_layout.addLayout(right, 1)
-
-    def _create_mission(self):
-        dlg = MissionDialog(self)
-        if dlg.exec_() == QDialog.Accepted:
-            shelf, sku, prio = dlg.get_values()
-            mid = self.bridge.send_mission(shelf, sku, prio)
-            self.mission_count += 1
-            row = self.queue_table.rowCount()
-            self.queue_table.insertRow(row)
-            self.queue_table.setItem(row, 0, QTableWidgetItem(mid))
-            self.queue_table.setItem(row, 1, QTableWidgetItem(shelf))
-            self.queue_table.setItem(row, 2, QTableWidgetItem("QUEUED"))
-            self._on_log("[GUI] Sent mission " + mid + " -> " + shelf)
-    def _reset_agv(self):
-        from PyQt5.QtWidgets import QMessageBox
-
-        reply = QMessageBox.question(
-        self,
-        "Reset AGV",
-        "Reset AGV and return to Home Dock?\n\nThis will cancel all active missions.",
-        QMessageBox.Yes | QMessageBox.No,
-        QMessageBox.No
-    )
-
-        if reply == QMessageBox.Yes:
-         self.bridge.send_reset_to_dock()
-
-    def _on_state(self, msg):
-        self.labels["State"].setText(msg.state)
-        self.labels["Mission"].setText(msg.mission_id if msg.mission_id else "-")
-        self.labels["Target"].setText(msg.target_shelf if msg.target_shelf else "-")
-        self.labels["Battery"].setText(str(int(msg.battery_percent)) + "%")
-        self.labels["Last RFID"].setText(msg.last_tag if msg.last_tag else "-")
-        self.bat_bar.setValue(int(msg.battery_percent))
-        if msg.state == "IDLE":
-            self.labels["Nav Status"].setText("READY")
-            self.labels["Nav Status"].setStyleSheet("color: #00ff88; font-weight: bold;")
-        elif msg.state == "ERROR":
-            self.labels["Nav Status"].setText("E-STOP")
-            self.labels["Nav Status"].setStyleSheet("color: #ff4444; font-weight: bold;")
-        else:
-            self.labels["Nav Status"].setText("ACTIVE")
-            self.labels["Nav Status"].setStyleSheet("color: #ffaa00; font-weight: bold;")
-
-    def _on_odom(self, x, y, yaw, vx, wz):
-        self.labels["Position"].setText("(%.2f, %.2f)" % (x, y))
-        self.labels["Heading"].setText("%.1f" % math.degrees(yaw))
-        self.labels["Velocity"].setText("%.2f m/s" % vx)
-        self.map_widget.update_robot(x, y, yaw)
-
-    def _on_log(self, text):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append("[" + ts + "] " + text)
-        if "complete" in text.lower():
-            self.completed_count += 1
-
-    def closeEvent(self, event):
-        self.bridge.shutdown()
-        event.accept()
-
-def main():
-    app = QApplication(sys.argv)
     bridge = RosBridge()
-    window = AtlasConsole(bridge)
+    window = MainWindow(bridge)
     window.show()
-    sys.exit(app.exec_())
+
+    # Drain the Qt event loop frequently so signals/timers stay responsive
+    # and SIGINT is honoured promptly.
+    keepalive = QTimer()
+    keepalive.timeout.connect(lambda: None)
+    keepalive.start(200)
+
+    try:
+        rc = app.exec_()
+    finally:
+        try:
+            bridge.shutdown()
+        except Exception:
+            pass
+    sys.exit(rc)
+
 
 if __name__ == "__main__":
     main()
 ```
 
----
-## FILE: src/atlas_mission_manager/atlas_mission_manager/atlas_control_center.py
-```
-404: Not Found```
 
 ---
 ## FILE: src/atlas_mission_manager/atlas_mission_manager/__init__.py
@@ -2989,6 +2696,1484 @@ def main():
     rclpy.shutdown()
 ```
 
+
+---
+## FILE: src/atlas_mission_manager/atlas_mission_manager/gui/__init__.py
+```
+"""ATLAS Fleet Control Center GUI helper sub-package."""
+```
+
+---
+## FILE: src/atlas_mission_manager/atlas_mission_manager/gui/theme.py
+```
+"""Visual theme for the ATLAS Fleet Control Center.
+
+Pure constants - no logic, no imports of Qt symbols required at module
+import time.  Kept separate so colours and the stylesheet can be tuned
+without touching widget code.
+"""
+
+# ---- Palette ----------------------------------------------------------
+BG_DEEP = "#0b0f1a"
+BG_PANEL = "#121a2c"
+BG_CARD = "#172238"
+BG_INPUT = "#1d2942"
+BORDER = "#2c3650"
+BORDER_SOFT = "#1f2940"
+
+TEXT_PRIMARY = "#e6f1ff"
+TEXT_MUTED = "#8aa0c2"
+TEXT_DIM = "#5d6c87"
+
+ACCENT = "#00d4aa"
+ACCENT_DARK = "#008f74"
+INFO = "#4ea1ff"
+WARN = "#ffaa00"
+DANGER = "#ff4d4d"
+DANGER_DARK = "#a02828"
+
+LOG_BG = "#0a1020"
+LOG_TS = "#5d6c87"
+LOG_INFO = "#cfd9ea"
+LOG_MISSION = "#00d4aa"
+LOG_WARN = "#ffaa00"
+LOG_ERROR = "#ff6b6b"
+
+# ---- Stylesheet -------------------------------------------------------
+APP_STYLESHEET = f"""
+* {{
+    font-family: "Segoe UI", "Inter", "Roboto", "Cantarell", "Ubuntu", sans-serif;
+    color: {TEXT_PRIMARY};
+}}
+
+QMainWindow, QWidget {{
+    background-color: {BG_DEEP};
+}}
+
+QLabel {{
+    background: transparent;
+}}
+
+QLabel#PageTitle {{
+    font-size: 20px;
+    font-weight: 700;
+    color: {ACCENT};
+    letter-spacing: 1px;
+}}
+
+QLabel#PageSubtitle {{
+    font-size: 11px;
+    color: {TEXT_MUTED};
+    letter-spacing: 2px;
+}}
+
+QLabel#SectionTitle {{
+    font-size: 11px;
+    font-weight: 700;
+    color: {TEXT_MUTED};
+    letter-spacing: 2px;
+    padding: 0 0 4px 2px;
+}}
+
+QLabel#CardTitle {{
+    color: {TEXT_MUTED};
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}}
+
+QLabel#CardValue {{
+    color: {ACCENT};
+    font-size: 16px;
+    font-weight: 700;
+}}
+
+QFrame#Card, QFrame#StatusCard, QFrame#ConnPill {{
+    background: {BG_CARD};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+
+QFrame#Panel {{
+    background: {BG_PANEL};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 12px;
+}}
+
+QFrame#Divider {{
+    background: {BORDER};
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+}}
+
+QPushButton {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: {TEXT_PRIMARY};
+    font-weight: 600;
+    min-height: 24px;
+}}
+
+QPushButton:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+
+QPushButton:pressed {{
+    background-color: {ACCENT};
+    color: {BG_DEEP};
+}}
+
+QPushButton:disabled {{
+    color: {TEXT_DIM};
+    border-color: {BORDER_SOFT};
+}}
+
+QPushButton#PrimaryButton {{
+    background-color: {ACCENT_DARK};
+    border-color: {ACCENT};
+    color: {BG_DEEP};
+}}
+
+QPushButton#PrimaryButton:hover {{
+    background-color: {ACCENT};
+}}
+
+QPushButton#WarnButton {{
+    background-color: #5a3a00;
+    border-color: {WARN};
+    color: {WARN};
+}}
+
+QPushButton#WarnButton:hover {{
+    background-color: {WARN};
+    color: {BG_DEEP};
+}}
+
+QPushButton#DangerButton {{
+    background-color: {DANGER_DARK};
+    border-color: {DANGER};
+    color: #ffe6e6;
+    font-weight: 700;
+    letter-spacing: 1px;
+}}
+
+QPushButton#DangerButton:hover {{
+    background-color: {DANGER};
+    color: {BG_DEEP};
+}}
+
+QComboBox, QSpinBox, QLineEdit {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: {TEXT_PRIMARY};
+    selection-background-color: {ACCENT};
+    selection-color: {BG_DEEP};
+    min-height: 22px;
+}}
+
+QComboBox:focus, QSpinBox:focus, QLineEdit:focus {{
+    border-color: {ACCENT};
+}}
+
+QComboBox::drop-down {{
+    border: none;
+    width: 22px;
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {BG_PANEL};
+    border: 1px solid {BORDER};
+    selection-background-color: {ACCENT_DARK};
+    color: {TEXT_PRIMARY};
+}}
+
+QTableWidget {{
+    background-color: {BG_CARD};
+    alternate-background-color: {BG_PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    gridline-color: {BORDER_SOFT};
+    color: {TEXT_PRIMARY};
+    selection-background-color: {ACCENT_DARK};
+    selection-color: {BG_DEEP};
+}}
+
+QHeaderView::section {{
+    background-color: {BG_INPUT};
+    color: {TEXT_MUTED};
+    border: none;
+    border-right: 1px solid {BORDER_SOFT};
+    border-bottom: 1px solid {BORDER};
+    padding: 6px 8px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}}
+
+QTableWidget::item {{
+    padding: 6px 8px;
+}}
+
+QTextEdit, QPlainTextEdit {{
+    background-color: {LOG_BG};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    color: {TEXT_PRIMARY};
+    font-family: "JetBrains Mono", "Fira Code", "Consolas", "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    padding: 6px;
+}}
+
+QScrollBar:vertical {{
+    background: {BG_PANEL};
+    width: 10px;
+    border: none;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {BORDER};
+    border-radius: 4px;
+    min-height: 24px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: {ACCENT_DARK};
+}}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+
+QScrollBar:horizontal {{
+    background: {BG_PANEL};
+    height: 10px;
+    border: none;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {BORDER};
+    border-radius: 4px;
+    min-width: 24px;
+}}
+
+QGroupBox {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    margin-top: 14px;
+    padding: 14px 10px 10px 10px;
+    font-weight: 700;
+    color: {TEXT_MUTED};
+    letter-spacing: 1px;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: {ACCENT};
+}}
+
+QToolTip {{
+    background-color: {BG_PANEL};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {ACCENT};
+    padding: 4px;
+}}
+
+QMessageBox, QDialog {{
+    background-color: {BG_PANEL};
+}}
+"""
+```
+
+---
+## FILE: src/atlas_mission_manager/atlas_mission_manager/gui/ros_bridge.py
+```
+"""ROS2 <-> Qt bridge for the ATLAS Fleet Control Center.
+
+Runs the rclpy spin loop in a daemon thread and forwards everything
+to the Qt main thread via :class:`PyQt5.QtCore.pyqtSignal`.
+
+All callbacks are wrapped in try/except so a malformed message, a
+schema change, or a temporarily missing topic will never crash the
+GUI.  Subscriptions and publishers are recreated transparently when
+peer nodes restart because rclpy/DDS handles re-discovery for us.
+"""
+
+import math
+import threading
+import time
+import uuid
+
+import rclpy
+from PyQt5.QtCore import QObject, pyqtSignal
+
+
+# These imports are wrapped because some message packages may not be
+# present on every machine where the GUI is launched (e.g. when only
+# parts of the workspace are built).  The GUI must still come up.
+try:
+    from std_msgs.msg import Empty, String
+except Exception:  # pragma: no cover - extremely unlikely
+    Empty = None
+    String = None
+
+try:
+    from nav_msgs.msg import Odometry
+except Exception:
+    Odometry = None
+
+try:
+    from atlas_interfaces.msg import FleetMission, RobotState, ShelfTag
+except Exception:
+    FleetMission = None
+    RobotState = None
+    ShelfTag = None
+
+
+class RosBridge(QObject):
+    """Background ROS2 worker that emits Qt signals on each event."""
+
+    # mission_id, target_shelf, sku, current_state, battery, last_tag,
+    # carrying, current_sku
+    state_signal = pyqtSignal(str, str, str, str, float, str, bool, str)
+    odom_signal = pyqtSignal(float, float, float, float, float)  # x, y, yaw, vx, wz
+    log_signal = pyqtSignal(str)
+    tag_signal = pyqtSignal(str, str, bool)  # tag_id, shelf_id, is_home
+    connection_signal = pyqtSignal(bool)
+    mission_sent_signal = pyqtSignal(str, str, str, int)  # id, shelf, sku, prio
+
+    def __init__(self):
+        super().__init__()
+        self._stop = False
+        self._spin_thread = None
+        self._wd_thread = None
+        self.node = None
+
+        self._last_state_t = 0.0
+        self._last_odom_t = 0.0
+        self._connected = False
+
+        self.pub_mission = None
+        self.pub_estop = None
+        self.pub_reset = None
+        self.pub_reset_dock = None
+
+        self._init_ros()
+
+    # ------------------------------------------------------------------
+    # initialisation
+    # ------------------------------------------------------------------
+    def _init_ros(self):
+        try:
+            if not rclpy.ok():
+                rclpy.init(args=None)
+            self.node = rclpy.create_node("atlas_gui")
+
+            if RobotState is not None:
+                self.node.create_subscription(
+                    RobotState, "/atlas/robot_state", self._on_state, 10
+                )
+            if Odometry is not None:
+                self.node.create_subscription(
+                    Odometry, "/atlas/odom", self._on_odom, 50
+                )
+            if String is not None:
+                self.node.create_subscription(
+                    String, "/atlas/log", self._on_log, 50
+                )
+            if ShelfTag is not None:
+                self.node.create_subscription(
+                    ShelfTag, "/atlas/tag_event", self._on_tag, 10
+                )
+
+            if FleetMission is not None:
+                self.pub_mission = self.node.create_publisher(
+                    FleetMission, "/atlas/mission_cmd", 10
+                )
+            if Empty is not None:
+                self.pub_estop = self.node.create_publisher(
+                    Empty, "/atlas/estop", 10
+                )
+                self.pub_reset = self.node.create_publisher(
+                    Empty, "/atlas/reset", 10
+                )
+                self.pub_reset_dock = self.node.create_publisher(
+                    Empty, "/atlas/reset_to_dock", 10
+                )
+
+            self._spin_thread = threading.Thread(
+                target=self._spin_loop, daemon=True, name="atlas-gui-spin"
+            )
+            self._spin_thread.start()
+
+            self._wd_thread = threading.Thread(
+                target=self._watchdog_loop, daemon=True, name="atlas-gui-wd"
+            )
+            self._wd_thread.start()
+
+        except Exception as ex:
+            print("[atlas_gui] ROS init error: %s" % ex, flush=True)
+
+    # ------------------------------------------------------------------
+    # background loops
+    # ------------------------------------------------------------------
+    def _spin_loop(self):
+        while not self._stop:
+            try:
+                if rclpy.ok() and self.node is not None:
+                    rclpy.spin_once(self.node, timeout_sec=0.05)
+                else:
+                    time.sleep(0.2)
+            except Exception as ex:
+                # Keep going so the GUI never crashes.
+                print("[atlas_gui] spin error: %s" % ex, flush=True)
+                time.sleep(0.2)
+
+    def _watchdog_loop(self):
+        while not self._stop:
+            try:
+                now = time.time()
+                fresh_state = (now - self._last_state_t) < 3.0
+                fresh_odom = (now - self._last_odom_t) < 3.0
+                connected = bool(fresh_state or fresh_odom)
+                if connected != self._connected:
+                    self._connected = connected
+                    self.connection_signal.emit(connected)
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    # ------------------------------------------------------------------
+    # subscription callbacks (run in spin thread)
+    # ------------------------------------------------------------------
+    def _on_state(self, msg):
+        try:
+            self._last_state_t = time.time()
+            state = getattr(msg, "state", "") or ""
+            mission_id = getattr(msg, "mission_id", "") or ""
+            target_shelf = getattr(msg, "target_shelf", "") or ""
+            current_sku = getattr(msg, "current_sku", "") or ""
+            last_tag = getattr(msg, "last_tag", "") or ""
+            carrying = bool(getattr(msg, "carrying_load", False))
+            battery = float(getattr(msg, "battery_percent", 0.0))
+            self.state_signal.emit(
+                mission_id, target_shelf, current_sku, state,
+                battery, last_tag, carrying, current_sku,
+            )
+        except Exception as ex:
+            print("[atlas_gui] state decode error: %s" % ex, flush=True)
+
+    def _on_odom(self, msg):
+        try:
+            self._last_odom_t = time.time()
+            x = float(msg.pose.pose.position.x)
+            y = float(msg.pose.pose.position.y)
+            q = msg.pose.pose.orientation
+            siny = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny, cosy)
+            vx = float(msg.twist.twist.linear.x)
+            wz = float(msg.twist.twist.angular.z)
+            self.odom_signal.emit(x, y, yaw, vx, wz)
+        except Exception as ex:
+            print("[atlas_gui] odom decode error: %s" % ex, flush=True)
+
+    def _on_log(self, msg):
+        try:
+            text = getattr(msg, "data", "") or ""
+            if text:
+                self.log_signal.emit(text)
+        except Exception as ex:
+            print("[atlas_gui] log decode error: %s" % ex, flush=True)
+
+    def _on_tag(self, msg):
+        try:
+            tag_id = getattr(msg, "tag_id", "") or ""
+            shelf_id = getattr(msg, "shelf_id", "") or ""
+            is_home = bool(getattr(msg, "is_home", False))
+            self.tag_signal.emit(tag_id, shelf_id, is_home)
+        except Exception as ex:
+            print("[atlas_gui] tag decode error: %s" % ex, flush=True)
+
+    # ------------------------------------------------------------------
+    # publishers (called from Qt main thread)
+    # ------------------------------------------------------------------
+    def send_mission(self, shelf, sku, priority):
+        if self.pub_mission is None or FleetMission is None:
+            return ""
+        try:
+            m = FleetMission()
+            m.mission_id = "gui-" + uuid.uuid4().hex[:6]
+            m.target_shelf = str(shelf)
+            m.sku = str(sku)
+            m.priority = int(priority)
+            self.pub_mission.publish(m)
+            self.mission_sent_signal.emit(
+                m.mission_id, str(shelf), str(sku), int(priority)
+            )
+            return m.mission_id
+        except Exception as ex:
+            print("[atlas_gui] publish mission failed: %s" % ex, flush=True)
+            return ""
+
+    def _publish_empty(self, pub):
+        if pub is None or Empty is None:
+            return False
+        try:
+            pub.publish(Empty())
+            return True
+        except Exception as ex:
+            print("[atlas_gui] publish empty failed: %s" % ex, flush=True)
+            return False
+
+    def send_estop(self):
+        return self._publish_empty(self.pub_estop)
+
+    def send_reset_estop(self):
+        return self._publish_empty(self.pub_reset)
+
+    def send_return_home(self):
+        return self._publish_empty(self.pub_reset_dock)
+
+    def send_reset_agv(self):
+        return self._publish_empty(self.pub_reset_dock)
+
+    # ------------------------------------------------------------------
+    def shutdown(self):
+        self._stop = True
+        try:
+            if self.node is not None:
+                self.node.destroy_node()
+        except Exception:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+```
+
+---
+## FILE: src/atlas_mission_manager/atlas_mission_manager/gui/widgets.py
+```
+"""Custom widgets used by the ATLAS Fleet Control Center."""
+
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout,
+    QWidget,
+)
+
+from . import theme as T
+
+
+class Card(QFrame):
+    """Generic rounded panel container."""
+
+    def __init__(self, parent=None, object_name="Card"):
+        super().__init__(parent)
+        self.setObjectName(object_name)
+        self.setFrameShape(QFrame.NoFrame)
+
+
+class StatusCard(QFrame):
+    """A single labelled metric card for the centre status panel."""
+
+    LEVELS = {
+        "ok": T.ACCENT,
+        "info": T.INFO,
+        "warn": T.WARN,
+        "error": T.DANGER,
+        "muted": T.TEXT_DIM,
+    }
+
+    def __init__(self, title, default="-", parent=None):
+        super().__init__(parent)
+        self.setObjectName("StatusCard")
+        self.setFrameShape(QFrame.NoFrame)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(4)
+        self._title = QLabel(title.upper())
+        self._title.setObjectName("CardTitle")
+        self._value = QLabel(default)
+        self._value.setObjectName("CardValue")
+        self._value.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self._value.setWordWrap(False)
+        layout.addWidget(self._title)
+        layout.addWidget(self._value)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.set_status("ok")
+
+    def set_value(self, text):
+        self._value.setText("" if text is None else str(text))
+
+    def set_status(self, level):
+        color = self.LEVELS.get(level, T.TEXT_PRIMARY)
+        self._value.setStyleSheet(
+            "color: %s; font-weight: 700; font-size: 16px;" % color
+        )
+
+
+class BatteryWidget(QFrame):
+    """Battery percent gauge with adaptive colour."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("StatusCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(6)
+
+        self._title = QLabel("BATTERY")
+        self._title.setObjectName("CardTitle")
+        self._value = QLabel("100%")
+        self._value.setObjectName("CardValue")
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(self._title)
+        top.addStretch()
+        top.addWidget(self._value)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(100)
+        self._bar.setTextVisible(False)
+        self._bar.setMinimumHeight(12)
+        self._bar.setMaximumHeight(12)
+
+        layout.addLayout(top)
+        layout.addWidget(self._bar)
+        self.set_percent(100.0)
+
+    def set_percent(self, pct):
+        try:
+            v = max(0, min(100, int(round(float(pct)))))
+        except Exception:
+            v = 0
+        self._bar.setValue(v)
+        self._value.setText("%d%%" % v)
+        if v >= 60:
+            color = T.ACCENT
+        elif v >= 25:
+            color = T.WARN
+        else:
+            color = T.DANGER
+        self._value.setStyleSheet("color: %s; font-weight: 700;" % color)
+        self._bar.setStyleSheet(
+            "QProgressBar { border: 1px solid %s; border-radius: 6px; "
+            "background: %s; }"
+            "QProgressBar::chunk { background: %s; border-radius: 5px; }"
+            % (T.BORDER, T.BG_INPUT, color)
+        )
+
+
+class ConnectionWidget(QFrame):
+    """Live / Offline indicator pill."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ConnPill")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
+
+        self._dot = QLabel("\u25CF")
+        self._dot.setAlignment(Qt.AlignVCenter | Qt.AlignHCenter)
+        self._label = QLabel("CONNECTING")
+        self._label.setAlignment(Qt.AlignVCenter)
+
+        layout.addWidget(self._dot)
+        layout.addWidget(self._label)
+        self.set_connected(False)
+
+    def set_connected(self, connected):
+        if connected:
+            self._label.setText("LIVE")
+            color = T.ACCENT
+        else:
+            self._label.setText("OFFLINE")
+            color = T.DANGER
+        self._dot.setStyleSheet("color: %s; font-size: 14px;" % color)
+        self._label.setStyleSheet(
+            "color: %s; font-weight: 700; letter-spacing: 1px;" % color
+        )
+
+
+class SectionLabel(QLabel):
+    """Small uppercase section header."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text.upper(), parent)
+        self.setObjectName("SectionTitle")
+
+
+class Divider(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Divider")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setFixedHeight(1)
+```
+
+---
+## FILE: src/atlas_mission_manager/atlas_mission_manager/gui/main_window.py
+```
+"""Main window for the ATLAS Fleet Control Center.
+
+Layout
+------
++-------------------------------------------------------------------+
+| header  (title + connection pill + clock)                         |
++--------------+----------------------------+-----------------------+
+| LEFT         | CENTER                     | RIGHT                 |
+|              |                            |                       |
+| Create       | AGV Status cards           | Mission queue table   |
+| Mission      | + Battery + Connectivity   | Mission history table |
+|              |                            | Active task list      |
+| Robot        |                            |                       |
+| Commands     |                            |                       |
++--------------+----------------------------+-----------------------+
+| BOTTOM: scrollable event log                                      |
++-------------------------------------------------------------------+
+"""
+
+import math
+from datetime import datetime
+
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont, QTextCursor
+from PyQt5.QtWidgets import (
+    QAbstractItemView, QComboBox, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+)
+
+from . import theme as T
+from .widgets import (
+    BatteryWidget, ConnectionWidget, Divider, SectionLabel, StatusCard,
+)
+
+
+# ---- shelf / SKU catalogue -------------------------------------------
+SHELVES = ["S%02d" % i for i in range(1, 21)]
+SKUS = ["SKU-001", "SKU-002", "SKU-003", "SKU-004", "SKU-005",
+        "SKU-006", "SKU-007", "SKU-008", "SKU-009", "SKU-010"]
+
+PRIORITY_LABELS = {0: "LOW", 1: "NORMAL", 2: "HIGH", 3: "URGENT"}
+
+
+# ----------------------------------------------------------------------
+# helper: panelled column
+# ----------------------------------------------------------------------
+def _panel(title=None):
+    panel = QFrame()
+    panel.setObjectName("Panel")
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(14, 14, 14, 14)
+    layout.setSpacing(10)
+    if title:
+        lbl = QLabel(title.upper())
+        lbl.setObjectName("SectionTitle")
+        layout.addWidget(lbl)
+    return panel, layout
+
+
+# ----------------------------------------------------------------------
+# main window
+# ----------------------------------------------------------------------
+class MainWindow(QMainWindow):
+
+    HISTORY_LIMIT = 50
+    LOG_LIMIT = 1000
+
+    def __init__(self, bridge):
+        super().__init__()
+        self.bridge = bridge
+
+        self.setWindowTitle("ATLAS Fleet Control Center")
+        self.setMinimumSize(1280, 760)
+        self.resize(1480, 880)
+
+        # mission tracking ------------------------------------------------
+        # ordered list of dicts: {id, shelf, sku, priority, status}
+        self._missions = []
+        # finished missions (most recent first)
+        self._history = []
+        self._last_active_id = ""
+        self._last_state = ""
+
+        self._build_ui()
+        self._connect_signals()
+
+        # clock tick
+        self._clock = QTimer(self)
+        self._clock.timeout.connect(self._update_clock)
+        self._clock.start(1000)
+        self._update_clock()
+
+        self._append_log("[GUI] ATLAS Fleet Control Center ready", "mission")
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
+
+        root.addWidget(self._build_header())
+
+        body_split = QSplitter(Qt.Vertical)
+        body_split.setChildrenCollapsible(False)
+        body_split.setHandleWidth(6)
+
+        cols = QSplitter(Qt.Horizontal)
+        cols.setChildrenCollapsible(False)
+        cols.setHandleWidth(6)
+        cols.addWidget(self._build_left_panel())
+        cols.addWidget(self._build_center_panel())
+        cols.addWidget(self._build_right_panel())
+        cols.setStretchFactor(0, 0)
+        cols.setStretchFactor(1, 2)
+        cols.setStretchFactor(2, 1)
+        cols.setSizes([300, 720, 420])
+
+        body_split.addWidget(cols)
+        body_split.addWidget(self._build_bottom_panel())
+        body_split.setStretchFactor(0, 4)
+        body_split.setStretchFactor(1, 1)
+        body_split.setSizes([600, 220])
+
+        root.addWidget(body_split, 1)
+
+    # ---- header -------------------------------------------------------
+    def _build_header(self):
+        bar = QFrame()
+        bar.setObjectName("Panel")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(18, 10, 18, 10)
+        h.setSpacing(16)
+
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+        title = QLabel("ATLAS  FLEET  CONTROL")
+        title.setObjectName("PageTitle")
+        sub = QLabel("WAREHOUSE AGV  -  COMMAND CONSOLE")
+        sub.setObjectName("PageSubtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(sub)
+        h.addLayout(title_box)
+        h.addStretch()
+
+        self.clock_label = QLabel("--:--:--")
+        self.clock_label.setStyleSheet(
+            "color: %s; font-family: monospace; font-size: 14px;" % T.TEXT_MUTED
+        )
+        h.addWidget(self.clock_label)
+
+        self.conn_widget = ConnectionWidget()
+        h.addWidget(self.conn_widget)
+        return bar
+
+    # ---- left panel ---------------------------------------------------
+    def _build_left_panel(self):
+        outer = QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setFrameShape(QFrame.NoFrame)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(12)
+
+        # ------ Create Mission ----------------------------------------
+        cm_panel, cm_layout = _panel("Create Mission")
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.shelf_combo = QComboBox()
+        self.shelf_combo.addItems(SHELVES)
+        form.addRow("Target shelf:", self.shelf_combo)
+
+        self.sku_combo = QComboBox()
+        self.sku_combo.addItems(SKUS)
+        form.addRow("SKU:", self.sku_combo)
+
+        self.prio_spin = QSpinBox()
+        self.prio_spin.setRange(0, 3)
+        self.prio_spin.setValue(1)
+        self.prio_spin.setToolTip("0=LOW  1=NORMAL  2=HIGH  3=URGENT")
+        form.addRow("Priority:", self.prio_spin)
+
+        cm_layout.addLayout(form)
+
+        self.btn_start = QPushButton("START MISSION")
+        self.btn_start.setObjectName("PrimaryButton")
+        self.btn_start.setMinimumHeight(40)
+        cm_layout.addWidget(self.btn_start)
+
+        col.addWidget(cm_panel)
+
+        # ------ Robot Commands ----------------------------------------
+        rc_panel, rc_layout = _panel("Robot Commands")
+
+        self.btn_return_home = QPushButton("Return Home")
+        self.btn_return_home.setMinimumHeight(36)
+        rc_layout.addWidget(self.btn_return_home)
+
+        self.btn_reset_agv = QPushButton("RESET AGV")
+        self.btn_reset_agv.setObjectName("WarnButton")
+        self.btn_reset_agv.setMinimumHeight(40)
+        rc_layout.addWidget(self.btn_reset_agv)
+
+        rc_layout.addWidget(Divider())
+
+        self.btn_estop = QPushButton("EMERGENCY  STOP")
+        self.btn_estop.setObjectName("DangerButton")
+        self.btn_estop.setMinimumHeight(54)
+        f = QFont()
+        f.setPointSize(12)
+        f.setBold(True)
+        self.btn_estop.setFont(f)
+        rc_layout.addWidget(self.btn_estop)
+
+        self.btn_reset_estop = QPushButton("Reset E-Stop")
+        self.btn_reset_estop.setMinimumHeight(34)
+        rc_layout.addWidget(self.btn_reset_estop)
+
+        col.addWidget(rc_panel)
+        col.addStretch(1)
+
+        outer.setWidget(container)
+        outer.setMinimumWidth(280)
+        outer.setMaximumWidth(360)
+        return outer
+
+    # ---- center panel -------------------------------------------------
+    def _build_center_panel(self):
+        panel, layout = _panel("AGV Status")
+
+        # status cards in a responsive grid
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        self.cards = {}
+        card_specs = [
+            ("State", "IDLE", "ok"),
+            ("Mission", "-", "muted"),
+            ("Shelf", "-", "muted"),
+            ("SKU", "-", "muted"),
+            ("RFID", "-", "muted"),
+            ("Carrying", "NO", "muted"),
+            ("Pos X", "0.00 m", "info"),
+            ("Pos Y", "0.00 m", "info"),
+            ("Heading", "0.0 deg", "info"),
+            ("Lin Vel", "0.00 m/s", "info"),
+            ("Ang Vel", "0.00 rad/s", "info"),
+            ("Nav", "READY", "ok"),
+        ]
+        cols = 4
+        for i, (name, default, level) in enumerate(card_specs):
+            card = StatusCard(name, default)
+            card.set_status(level)
+            self.cards[name] = card
+            grid.addWidget(card, i // cols, i % cols)
+
+        layout.addLayout(grid)
+
+        # battery + connectivity row
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
+        self.battery = BatteryWidget()
+        bottom_row.addWidget(self.battery, 2)
+
+        conn_card = QFrame()
+        conn_card.setObjectName("StatusCard")
+        cl = QHBoxLayout(conn_card)
+        cl.setContentsMargins(14, 10, 14, 10)
+        cl.setSpacing(10)
+        title = QLabel("CONNECTIVITY")
+        title.setObjectName("CardTitle")
+        cl.addWidget(title)
+        cl.addStretch()
+        self.conn_inline = ConnectionWidget()
+        cl.addWidget(self.conn_inline)
+        bottom_row.addWidget(conn_card, 1)
+
+        layout.addLayout(bottom_row)
+        layout.addStretch(1)
+        return panel
+
+    # ---- right panel --------------------------------------------------
+    def _build_right_panel(self):
+        outer = QFrame()
+        col = QVBoxLayout(outer)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(12)
+
+        # mission queue --------------------------------------------------
+        q_panel, q_layout = _panel("Mission Queue")
+        self.queue_table = QTableWidget(0, 5)
+        self.queue_table.setHorizontalHeaderLabels(
+            ["ID", "Shelf", "SKU", "Prio", "Status"]
+        )
+        self.queue_table.verticalHeader().setVisible(False)
+        self.queue_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.queue_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.queue_table.setAlternatingRowColors(True)
+        self.queue_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.queue_table.setMinimumHeight(140)
+        q_layout.addWidget(self.queue_table)
+        col.addWidget(q_panel, 2)
+
+        # mission history -----------------------------------------------
+        h_panel, h_layout = _panel("Mission History")
+        self.history_table = QTableWidget(0, 5)
+        self.history_table.setHorizontalHeaderLabels(
+            ["Time", "ID", "Shelf", "SKU", "Result"]
+        )
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.history_table.setMinimumHeight(140)
+        h_layout.addWidget(self.history_table)
+        col.addWidget(h_panel, 2)
+
+        # active task list ----------------------------------------------
+        a_panel, a_layout = _panel("Active Task")
+        self.active_table = QTableWidget(6, 2)
+        self.active_table.verticalHeader().setVisible(False)
+        self.active_table.horizontalHeader().setVisible(False)
+        self.active_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.active_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.active_table.setShowGrid(False)
+        self.active_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.active_table.setFocusPolicy(Qt.NoFocus)
+        self.active_rows = ["State", "Mission", "Target", "SKU", "RFID", "Carrying"]
+        for i, name in enumerate(self.active_rows):
+            k = QTableWidgetItem(name)
+            k.setForeground(self._color_brush(T.TEXT_MUTED))
+            v = QTableWidgetItem("-")
+            v.setForeground(self._color_brush(T.ACCENT))
+            v.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.active_table.setItem(i, 0, k)
+            self.active_table.setItem(i, 1, v)
+        self.active_table.setMinimumHeight(180)
+        a_layout.addWidget(self.active_table)
+        col.addWidget(a_panel, 1)
+
+        return outer
+
+    @staticmethod
+    def _color_brush(hex_color):
+        from PyQt5.QtGui import QBrush, QColor
+        return QBrush(QColor(hex_color))
+
+    # ---- bottom panel -------------------------------------------------
+    def _build_bottom_panel(self):
+        panel, layout = _panel("Event Log")
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.addStretch()
+        self.btn_clear_log = QPushButton("Clear")
+        self.btn_clear_log.setMaximumWidth(100)
+        toolbar.addWidget(self.btn_clear_log)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setLineWrapMode(QTextEdit.NoWrap)
+        self.log_view.setMinimumHeight(120)
+
+        layout.addLayout(toolbar)
+        layout.addWidget(self.log_view, 1)
+        return panel
+
+    # ------------------------------------------------------------------
+    # signal wiring
+    # ------------------------------------------------------------------
+    def _connect_signals(self):
+        # buttons
+        self.btn_start.clicked.connect(self._on_start_mission)
+        self.btn_return_home.clicked.connect(self._on_return_home)
+        self.btn_reset_agv.clicked.connect(self._on_reset_agv)
+        self.btn_estop.clicked.connect(self._on_estop)
+        self.btn_reset_estop.clicked.connect(self._on_reset_estop)
+        self.btn_clear_log.clicked.connect(self.log_view.clear)
+
+        # bridge
+        self.bridge.state_signal.connect(self._on_state)
+        self.bridge.odom_signal.connect(self._on_odom)
+        self.bridge.log_signal.connect(self._on_ros_log)
+        self.bridge.tag_signal.connect(self._on_tag)
+        self.bridge.connection_signal.connect(self._on_connection)
+        self.bridge.mission_sent_signal.connect(self._on_mission_sent)
+
+    # ------------------------------------------------------------------
+    # button handlers
+    # ------------------------------------------------------------------
+    def _on_start_mission(self):
+        try:
+            shelf = self.shelf_combo.currentText()
+            sku = self.sku_combo.currentText()
+            prio = int(self.prio_spin.value())
+            mid = self.bridge.send_mission(shelf, sku, prio)
+            if not mid:
+                self._append_log(
+                    "[GUI] Failed to publish mission - is mission_node running?",
+                    "error",
+                )
+                QMessageBox.warning(
+                    self, "Mission Failed",
+                    "Could not publish on /atlas/mission_cmd.\n"
+                    "Verify the mission_node is running.",
+                )
+        except Exception as ex:
+            self._append_log("[GUI] Start mission error: %s" % ex, "error")
+
+    def _on_return_home(self):
+        if self.bridge.send_return_home():
+            self._append_log(
+                "[GUI] Return Home commanded (-> /atlas/reset_to_dock)",
+                "mission",
+            )
+        else:
+            self._append_log("[GUI] Return Home failed", "error")
+
+    def _on_reset_agv(self):
+        reply = QMessageBox.question(
+            self,
+            "Reset AGV",
+            "Reset the AGV and return it to the home dock?\n\n"
+            "This will:\n"
+            "  - Cancel the active mission\n"
+            "  - Clear the navigation goal\n"
+            "  - Clear the mission queue\n"
+            "  - Respawn the AGV at the home dock\n"
+            "  - Reset state to IDLE",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if not self.bridge.send_reset_agv():
+            self._append_log("[GUI] RESET AGV failed", "error")
+            return
+
+        self._append_log("[GUI] RESET AGV commanded", "warn")
+        # Mark anything still queued/active as cancelled locally.
+        for m in self._missions:
+            if m["status"] in ("QUEUED", "ACTIVE"):
+                m["status"] = "CANCELLED"
+                self._archive_mission(m, "CANCELLED")
+        self._missions = [m for m in self._missions if m["status"]
+                          in ("DONE", "CANCELLED")]
+        self._refresh_queue_table()
+
+    def _on_estop(self):
+        if self.bridge.send_estop():
+            self._append_log("[GUI] EMERGENCY STOP triggered", "error")
+        else:
+            self._append_log("[GUI] E-Stop publish failed", "error")
+
+    def _on_reset_estop(self):
+        if self.bridge.send_reset_estop():
+            self._append_log("[GUI] E-Stop cleared", "mission")
+        else:
+            self._append_log("[GUI] Reset E-Stop publish failed", "error")
+
+    # ------------------------------------------------------------------
+    # ROS-driven slots (Qt main thread)
+    # ------------------------------------------------------------------
+    def _on_state(self, mission_id, target_shelf, current_sku, state,
+                  battery, last_tag, carrying, _sku_dup):
+        try:
+            self.cards["State"].set_value(state or "IDLE")
+            self.cards["State"].set_status(self._level_for_state(state))
+            self.cards["Mission"].set_value(mission_id or "-")
+            self.cards["Mission"].set_status(
+                "ok" if mission_id else "muted"
+            )
+            self.cards["Shelf"].set_value(target_shelf or "-")
+            self.cards["Shelf"].set_status(
+                "ok" if target_shelf else "muted"
+            )
+            self.cards["SKU"].set_value(current_sku or "-")
+            self.cards["SKU"].set_status(
+                "ok" if current_sku else "muted"
+            )
+            self.cards["RFID"].set_value(last_tag or "-")
+            self.cards["RFID"].set_status(
+                "info" if last_tag else "muted"
+            )
+            self.cards["Carrying"].set_value("YES" if carrying else "NO")
+            self.cards["Carrying"].set_status(
+                "warn" if carrying else "muted"
+            )
+
+            nav_text, nav_level = self._nav_indicator(state)
+            self.cards["Nav"].set_value(nav_text)
+            self.cards["Nav"].set_status(nav_level)
+
+            self.battery.set_percent(battery)
+
+            # active task panel
+            self._set_active_row("State", state or "-")
+            self._set_active_row("Mission", mission_id or "-")
+            self._set_active_row("Target", target_shelf or "-")
+            self._set_active_row("SKU", current_sku or "-")
+            self._set_active_row("RFID", last_tag or "-")
+            self._set_active_row("Carrying", "YES" if carrying else "NO")
+
+            # mission queue tracking
+            self._update_queue_from_state(mission_id, state)
+
+            self._last_active_id = mission_id
+            self._last_state = state or ""
+        except Exception as ex:
+            self._append_log("[GUI] state slot error: %s" % ex, "error")
+
+    def _on_odom(self, x, y, yaw, vx, wz):
+        try:
+            self.cards["Pos X"].set_value("%.2f m" % x)
+            self.cards["Pos Y"].set_value("%.2f m" % y)
+            self.cards["Heading"].set_value(
+                "%.1f deg" % math.degrees(yaw)
+            )
+            self.cards["Lin Vel"].set_value("%.2f m/s" % vx)
+            self.cards["Ang Vel"].set_value("%.2f rad/s" % wz)
+        except Exception as ex:
+            self._append_log("[GUI] odom slot error: %s" % ex, "error")
+
+    def _on_ros_log(self, text):
+        level = "info"
+        low = text.lower()
+        if any(k in low for k in ("error", "fail", "rejected", "estop", "e-stop")):
+            level = "error"
+        elif any(k in low for k in ("warn", "warning")):
+            level = "warn"
+        elif any(k in low for k in (
+            "mission", "queued", "complete", "state ", "reset", "returned"
+        )):
+            level = "mission"
+        self._append_log(text, level)
+
+    def _on_tag(self, tag_id, shelf_id, is_home):
+        if is_home:
+            text = "[RFID] HOME tag %s" % tag_id
+        else:
+            text = "[RFID] %s -> %s" % (tag_id, shelf_id or "?")
+        self._append_log(text, "info")
+
+    def _on_connection(self, connected):
+        self.conn_widget.set_connected(connected)
+        self.conn_inline.set_connected(connected)
+        if connected:
+            self._append_log("[GUI] ROS connection LIVE", "mission")
+        else:
+            self._append_log("[GUI] ROS connection lost - waiting...", "warn")
+
+    def _on_mission_sent(self, mission_id, shelf, sku, prio):
+        entry = {
+            "id": mission_id,
+            "shelf": shelf,
+            "sku": sku,
+            "priority": int(prio),
+            "status": "QUEUED",
+        }
+        self._missions.append(entry)
+        self._refresh_queue_table()
+        self._append_log(
+            "[GUI] Mission %s queued -> %s (%s, prio=%s)"
+            % (mission_id, shelf, sku, PRIORITY_LABELS.get(prio, str(prio))),
+            "mission",
+        )
+
+    # ------------------------------------------------------------------
+    # mission queue helpers
+    # ------------------------------------------------------------------
+    def _update_queue_from_state(self, mission_id, state):
+        if mission_id:
+            for m in self._missions:
+                if m["id"] == mission_id and m["status"] != "ACTIVE":
+                    m["status"] = "ACTIVE"
+            self._refresh_queue_table()
+            return
+
+        # No active mission reported.  If we just transitioned away from a
+        # previously-active mission, archive it as DONE.
+        if self._last_active_id and not mission_id:
+            for m in self._missions:
+                if m["id"] == self._last_active_id and m["status"] == "ACTIVE":
+                    m["status"] = "DONE"
+                    self._archive_mission(m, "DONE")
+            self._missions = [m for m in self._missions
+                              if m["status"] not in ("DONE", "CANCELLED")]
+            self._refresh_queue_table()
+
+    def _refresh_queue_table(self):
+        active = [m for m in self._missions
+                  if m["status"] in ("QUEUED", "ACTIVE")]
+        self.queue_table.setRowCount(len(active))
+        for r, m in enumerate(active):
+            self._set_cell(self.queue_table, r, 0, m["id"])
+            self._set_cell(self.queue_table, r, 1, m["shelf"])
+            self._set_cell(self.queue_table, r, 2, m["sku"])
+            self._set_cell(
+                self.queue_table, r, 3,
+                PRIORITY_LABELS.get(m["priority"], str(m["priority"])),
+            )
+            color = T.ACCENT if m["status"] == "ACTIVE" else T.WARN
+            self._set_cell(self.queue_table, r, 4, m["status"], color)
+
+    def _archive_mission(self, m, result):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._history.insert(0, {
+            "time": ts,
+            "id": m["id"],
+            "shelf": m["shelf"],
+            "sku": m["sku"],
+            "result": result,
+        })
+        self._history = self._history[: self.HISTORY_LIMIT]
+        self._refresh_history_table()
+
+    def _refresh_history_table(self):
+        self.history_table.setRowCount(len(self._history))
+        for r, h in enumerate(self._history):
+            self._set_cell(self.history_table, r, 0, h["time"])
+            self._set_cell(self.history_table, r, 1, h["id"])
+            self._set_cell(self.history_table, r, 2, h["shelf"])
+            self._set_cell(self.history_table, r, 3, h["sku"])
+            color = T.ACCENT if h["result"] == "DONE" else T.DANGER
+            self._set_cell(self.history_table, r, 4, h["result"], color)
+
+    @staticmethod
+    def _set_cell(table, row, col, text, color=None):
+        item = QTableWidgetItem("" if text is None else str(text))
+        if color is not None:
+            from PyQt5.QtGui import QBrush, QColor
+            item.setForeground(QBrush(QColor(color)))
+        table.setItem(row, col, item)
+
+    def _set_active_row(self, key, value):
+        if key not in self.active_rows:
+            return
+        r = self.active_rows.index(key)
+        item = self.active_table.item(r, 1)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.active_table.setItem(r, 1, item)
+        item.setText("" if value is None else str(value))
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+    # ------------------------------------------------------------------
+    # state helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _level_for_state(state):
+        if not state:
+            return "muted"
+        s = state.upper()
+        if s in ("IDLE", "DOCKED"):
+            return "ok"
+        if s == "ERROR":
+            return "error"
+        if s in ("AT_SHELF", "PICKUP"):
+            return "info"
+        return "warn"
+
+    @staticmethod
+    def _nav_indicator(state):
+        if not state:
+            return ("UNKNOWN", "muted")
+        s = state.upper()
+        if s == "IDLE":
+            return ("READY", "ok")
+        if s == "ERROR":
+            return ("E-STOP", "error")
+        if s == "DOCKED":
+            return ("DOCKED", "ok")
+        return ("ACTIVE", "warn")
+
+    # ------------------------------------------------------------------
+    # log helpers
+    # ------------------------------------------------------------------
+    def _append_log(self, text, level="info"):
+        if text is None:
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        color_map = {
+            "info": T.LOG_INFO,
+            "mission": T.LOG_MISSION,
+            "warn": T.LOG_WARN,
+            "error": T.LOG_ERROR,
+        }
+        color = color_map.get(level, T.LOG_INFO)
+
+        # Escape minimal HTML so robot log can't inject markup.
+        safe = (str(text)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+        line = (
+            '<span style="color:%s;">[%s]</span> '
+            '<span style="color:%s;">%s</span>'
+            % (T.LOG_TS, ts, color, safe)
+        )
+        self.log_view.append(line)
+
+        # Cap log length so memory stays bounded.
+        if self.log_view.document().blockCount() > self.LOG_LIMIT:
+            cursor = self.log_view.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _update_clock(self):
+        self.clock_label.setText(datetime.now().strftime("%H:%M:%S"))
+
+    # ------------------------------------------------------------------
+    def closeEvent(self, event):
+        try:
+            self.bridge.shutdown()
+        except Exception:
+            pass
+        event.accept()
+```
 ---
 ## FILE: src/atlas_mission_manager/atlas_mission_manager/mission_node.py
 ```
@@ -3239,7 +4424,7 @@ if __name__ == '__main__':
 <package format="3">
   <name>atlas_mission_manager</name>
   <version>1.0.0</version>
-  <description>ATLAS mission FSM and velocity arbiter</description>
+  <description>ATLAS mission FSM, velocity arbiter, CLI sender, and Fleet Control Center GUI</description>
   <maintainer email="atlas@dev.local">atlas</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_python</buildtool_depend>
@@ -3248,6 +4433,7 @@ if __name__ == '__main__':
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>atlas_interfaces</depend>
+  <depend>python3-pyqt5</depend>
   <export><build_type>ament_python</build_type></export>
 </package>
 ```
@@ -3256,21 +4442,34 @@ if __name__ == '__main__':
 ## FILE: src/atlas_mission_manager/setup.py
 ```
 from setuptools import setup
+
+package_name = 'atlas_mission_manager'
+
 setup(
-    name='atlas_mission_manager',
+    name=package_name,
     version='1.0.0',
-    packages=['atlas_mission_manager'],
+    packages=[
+        package_name,
+        package_name + '.gui',
+    ],
     data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/atlas_mission_manager']),
-        ('share/atlas_mission_manager', ['package.xml']),
+        ('share/ament_index/resource_index/packages',
+         ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
-        entry_points={'console_scripts': [
-        'mission_node = atlas_mission_manager.mission_node:main',
-        'send_mission = atlas_mission_manager.send_mission:main', 'atlas_gui = atlas_mission_manager.atlas_control_center:main', 'atlas_gui = atlas_mission_manager.atlas_control_center:main',
-        'atlas_gui = atlas_mission_manager.atlas_gui:main',
-    ]},
-
+    zip_safe=True,
+    maintainer='atlas',
+    maintainer_email='atlas@dev.local',
+    description='ATLAS mission FSM, velocity arbiter, CLI sender, and GUI.',
+    license='MIT',
+    entry_points={
+        'console_scripts': [
+            'mission_node = atlas_mission_manager.mission_node:main',
+            'send_mission = atlas_mission_manager.send_mission:main',
+            'atlas_gui    = atlas_mission_manager.atlas_gui:main',
+        ],
+    },
 )
 ```
 

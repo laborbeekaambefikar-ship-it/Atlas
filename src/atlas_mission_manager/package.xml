@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>atlas_mission_manager</name>
+  <version>1.0.0</version>
+  <description>ATLAS mission FSM, velocity arbiter, CLI sender, and Fleet Control Center GUI</description>
+  <maintainer email="atlas@dev.local">atlas</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>atlas_interfaces</depend>
+  <depend>python3-pyqt5</depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
